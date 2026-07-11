@@ -1,0 +1,112 @@
+# Recommended Workflow Architecture
+
+Here's the recommended workflow for a React app user call through the AgentCore ecosystem:
+
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐
+│   React App     │    │  Amazon Cognito  │    │   AgentCore         │
+│   (Frontend)    │◄──►│  Authentication  │    │   Gateway           │
+└─────────────────┘    └──────────────────┘    └─────────────────────┘
+         │                        │                        │
+         │ 1. User Authentication  │                        │
+         │◄──────────────────────►│                        │
+         │                        │                        │
+         │ 2. JWT Token           │                        │
+         │◄───────────────────────┤                        │
+         │                        │                        │
+         │ 3. API Call with JWT   │                        │
+         │────────────────────────┼───────────────────────►│
+         │                        │                        │
+         │                        │    ┌─────────────────────┐
+         │                        │    │   Policy Engine     │
+         │                        │    │   & Guardrails      │
+         │                        │    └─────────────────────┘
+         │                        │                        │
+         │                        │    ┌─────────────────────┐
+         │                        │    │   Request/Response  │
+         │                        │    │   Interceptors      │
+         │                        │    └─────────────────────┘
+         │                        │                        │
+         │                        │                        ▼
+         │                        │    ┌─────────────────────┐
+         │                        │    │   AgentCore         │
+         │                        │    │   Runtime           │
+         │                        │    │   (MicroVM)         │
+         │                        │    └─────────────────────┘
+         │                        │                        │
+         │                        │    ┌─────────────────────┐
+         │                        │    │   Agent Logic       │
+         │                        │    │   (Strands/         │
+         │                        │    │   LangGraph)        │
+         │                        │    └─────────────────────┘
+         │                        │                        │
+         │                        │    ┌─────────────────────┐
+         │                        │    │   MCP Tools &       │
+         │                        │    │   External APIs     │
+         │                        │    └─────────────────────┘
+         │                        │                        │
+         │ 4. Streaming Response  │                        │
+         │◄───────────────────────┼────────────────────────┤
+         │                        │                        │
+
+## Detailed Workflow Steps
+1. User Authentication
+- User signs into React app via Amazon Cognito
+- Cognito provides JWT bearer token for authenticated sessions
+- Token includes user identity and authorized scopes
+
+2. Request Flow Through Gateway
+- React app makes API calls to AgentCore Gateway with JWT token
+- Gateway validates token and applies policy-based authorization
+- Policy Engine evaluates request against defined policies
+- Amazon Bedrock Guardrails screen requests for:
+- - Content filtering (violence, hate, sexual content, etc.)
+- - Prompt injection attacks
+- - Sensitive information (PII, credentials)
+- - Custom organizational policies
+
+3. Request/Response Interceptors
+- Lambda functions inspect and transform traffic
+- Can implement custom business logic, logging, or additional security checks
+- Support both buffered and streaming modes
+
+4. AgentCore Runtime Execution
+- Gateway routes approved requests to AgentCore Runtime
+- Runtime executes in isolated MicroVM environment
+- Agent orchestration via Strands Agents or LangGraph
+- Access to MCP tools and external APIs through gateway
+
+5. Response Processing
+- Runtime generates response through foundation model
+- Response flows back through gateway guardrails
+- Interceptors can modify or log responses
+- Streaming responses delivered to React app in real-time
+
+## Key Security Features
+- Multi-layered Security: Authentication, authorization, guardrails, and interceptors
+- Session Isolation: Each user session runs in dedicated MicroVM
+- Identity Propagation: JWT tokens carry user context throughout system
+- Audit Logging: Complete request/response logging via CloudWatch and X-Ray
+
+
+## Documentation Links
+Here are the key documentation resources:
+
+- [Getting Started with Guardrails in AgentCore CLI ](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-guardrails-getting-started.html) - Complete setup guide for guardrails
+- [Security Best Practices for AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-security-best-practices.html)  - Comprehensive security guidance
+- [Authentication and Authorization Guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-oauth.html)  - JWT and OAuth setup
+- [AgentCore Runtime Targets](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-target-http-runtime.html)  - Gateway integration patterns
+- [Guardrails Implementation Best Practices](https://docs.aws.amazon.com/wellarchitected/latest/agentic-ai-lens/agentsec04-bp01.html)  - Well-Architected guidance
+
+
+## Sample Implementation
+For a complete reference implementation, check out the [Full-Stack AgentCore Solution Template (FAST)](https://aws.amazon.com/blogs/machine-learning/accelerate-agentic-application-development-with-a-full-stack-starter-template-for-amazon-bedrock-agentcore/)  which provides:
+
+- React frontend with Cognito authentication
+- Complete AgentCore Runtime setup
+- Gateway configuration with guardrails
+- CDK infrastructure as code
+- Production-ready patterns
+
+This architecture ensures secure, scalable, and governed access to your AI agents while maintaining excellent user experience through streaming responses and real-time interaction.
+
+
