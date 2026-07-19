@@ -1,0 +1,4 @@
+# AgentCore Runtime dependencies
+bedrock-agentcore
+strands-agents
+boto3
