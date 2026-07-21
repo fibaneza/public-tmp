@@ -169,7 +169,8 @@ AWS publishes two lenses that apply directly here — review against both.
 - Don't use AgentCore Runtime as a general-purpose CRUD backend.
 - Don't let the agent hold ACID transactions or touch the app database directly.
 - Don't build **new** agents on Bedrock Agents "Classic" — it closes to new customers
-  2026-07-30; use AgentCore + a framework.
+  2026-07-30 (existing agents keep running in maintenance mode, no planned EOL); use
+  AgentCore + a framework.
 - Don't over-provision a large model on every route "to be safe" — measure, then escalate.
 
 ## Sources

@@ -105,10 +105,11 @@ Masking applies to **both requests and responses**.
 bedrock.create_guardrail(name="pii-guard",
     sensitiveInformationPolicyConfig={
         "piiEntitiesConfig": [
-            {"type": "EMAIL", "action": "ANONYMIZE",
+            {"type": "EMAIL",
              "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE",
              "inputEnabled": True, "outputEnabled": True},
-            {"type": "CREDIT_DEBIT_CARD_NUMBER", "action": "BLOCK",
+            {"type": "CREDIT_DEBIT_CARD_NUMBER",
+             "inputAction": "BLOCK", "outputAction": "BLOCK",
              "inputEnabled": True, "outputEnabled": True}],
         "regexesConfig": [
             {"name": "BookingID", "pattern": r"^[A-Z]{2}\d{6}$", "action": "ANONYMIZE"}]},

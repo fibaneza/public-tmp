@@ -52,7 +52,8 @@ from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from langgraph.prebuilt import create_react_agent
 
 app = BedrockAgentCoreApp()
-graph = create_react_agent("bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0", tools=[])
+# use the bedrock_converse: prefix (ChatBedrockConverse) — reliable tool calling
+graph = create_react_agent("bedrock_converse:us.anthropic.claude-sonnet-4-5-20250929-v1:0", tools=[])
 
 @app.entrypoint
 def invoke(payload, context):
