@@ -30,6 +30,7 @@ dependency chain.
 | 10 | [`10-observability-tracing-logs-monitoring.md`](10-observability-tracing-logs-monitoring.md) | OTel/ADOT, CloudWatch GenAI Observability, Transaction Search, model-invocation logging, metrics, alarms, cost tracking. |
 | 11 | [`11-deployment.md`](11-deployment.md) | Starter toolkit, `@aws/agentcore` CLI, CDK, CloudFormation, Terraform, CI/CD. |
 | 12 | [`12-production-readiness-checklist.md`](12-production-readiness-checklist.md) | One consolidated `- [ ]` checklist across every concept. |
+| 13 | [`13-performance.md`](13-performance.md) | Latency, throughput/concurrency, Runtime cold starts, RAG/memory/guardrail performance, and how to measure. |
 
 ## Platform in one paragraph
 
@@ -92,7 +93,7 @@ experimental API surface that can change.
 | Bedrock RAG evaluation / LLM-as-a-judge | **GA** | GA March 2025. |
 | Prompt caching, Cross-Region Inference (CRIS) | **GA** | CRIS needs a **two-ARN** IAM policy — see `08`. |
 | Bedrock CDK L2 (`aws-bedrock-alpha`, `generative-ai-cdk-constructs`) | **alpha / deprecating** | `generative-ai-cdk-constructs` is migrating into `@aws-cdk/aws-bedrock-alpha`. |
-| Bedrock **Agents "Classic"** (`bedrock-agent` `create_agent`) | **Closing** | **Closes to new customers 2026-07-30.** Build new agents on AgentCore + a framework, not Agents Classic. |
+| Bedrock **Agents "Classic"** (`bedrock-agent` `create_agent`) | **Closing to new** | **Closes to new customers 2026-07-30.** Existing customers keep it in **maintenance mode** (no planned EOL, no migration deadline). Build **new** agents on AgentCore + a framework. |
 
 ## Related repo documents (cross-referenced, not duplicated)
 

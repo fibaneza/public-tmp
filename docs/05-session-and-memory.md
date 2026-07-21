@@ -112,10 +112,22 @@ resp = control.create_memory(
 # poll get_memory(memoryId=...) until status == "ACTIVE"
 ```
 
+### Two SDK layers (know which you're calling)
+
+The memory API exists at two layers with **different names** — mixing them is a common error:
+
+| Layer | Create | Retrieve LTM | Namespaces field |
+|---|---|---|---|
+| **boto3 low-level** (`bedrock-agentcore-control` / `bedrock-agentcore`) | `create_memory(memoryStrategies=…)` | `retrieve_memory_records(memoryId, namespace, searchCriteria={searchQuery, topK})` | `namespaceTemplates` (camelCase) |
+| **high-level SDK** (`MemoryClient`) | `create_memory_and_wait(strategies=…, event_expiry_days=…)` | `retrieve_memories(memory_id, namespace, query)` | `namespaces` (snake_case) |
+
+The provision snippet above uses the boto3 layer; the snippets below use `MemoryClient`. Pick one
+layer per module and stay consistent.
+
 ### Write & retrieve — the framework-agnostic path (`MemoryClient`)
 
-Any framework can call the SDK directly. STM writes are synchronous; LTM retrieval maps to
-`retrieve_memory_records` (~200 ms).
+Any framework can call the SDK directly. STM writes are synchronous; LTM retrieval (~200 ms) is
+`MemoryClient.retrieve_memories` — a convenience wrapper over the boto3 `retrieve_memory_records`.
 
 ```python
 from bedrock_agentcore.memory import MemoryClient
@@ -162,15 +174,30 @@ concrete reason.
 
 ### LangGraph & CrewAI
 
-Neither ships an AgentCore-native session manager, so back their memory with `MemoryClient`:
+**LangGraph has a native integration.** The `langgraph-checkpoint-aws` package provides
+`AgentCoreMemorySaver`, a checkpointer whose `thread_id` maps to the AgentCore `session_id` and
+`actor_id` to the actor — so short-term persistence is handled for you (no hand-rolled
+`create_event`):
 
-- **LangGraph** — implement a checkpointer (or a node) that loads `get_last_k_turns` into state
-  on entry and writes `create_event` on each message; pull LTM with `retrieve_memories` where
-  you assemble the prompt.
-- **CrewAI** — use its memory hooks / callbacks to call `create_event` after each task and
-  `retrieve_memories` before, keyed by the same `(actor_id, session_id)`.
+```python
+from langgraph_checkpoint_aws import AgentCoreMemorySaver   # pip install langgraph-checkpoint-aws
+from langgraph.prebuilt import create_react_agent
 
-The primitive is identical across frameworks; only the integration point differs.
+checkpointer = AgentCoreMemorySaver(MEMORY_ID, region_name="us-west-2")
+graph = create_react_agent("bedrock_converse:us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                           tools=tools, checkpointer=checkpointer)
+graph.invoke({"messages": [("human", prompt)]},
+    config={"configurable": {"thread_id": session_id, "actor_id": actor_id}})  # both REQUIRED
+```
+
+For long-term memories, pull them with `MemoryClient.retrieve_memories` inside a `pre_model_hook`
+and inject them into the prompt.
+
+**CrewAI** has no first-class AgentCore memory manager today (verify per version) — back it with
+`MemoryClient`: call `create_event` after each task and `retrieve_memories` before, keyed by the
+same `(actor_id, session_id)`.
+
+The underlying primitive is identical; only the integration point differs.
 
 ### The async caveat that bites people
 

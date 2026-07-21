@@ -93,6 +93,15 @@
 - [ ] One endpoint per environment; immutable versions used for rollback.
 - [ ] Reproducible builds (`uv`, pinned `requirements.txt`).
 
+## Performance → [`13`](13-performance.md)
+
+- [ ] Time-to-first-token and p90/p99 latency tracked; SLOs set and alarmed (not just averages).
+- [ ] Prompt caching on stable prefixes; responses streamed; models tiered by task.
+- [ ] boto3 clients reused with a sized connection pool and adaptive retries.
+- [ ] Independent retrieval/tool calls parallelized; ingestion and unbounded memory loads kept
+      off the request path.
+- [ ] Load-tested to the throttle ceiling; CRIS / Provisioned Throughput sized to peak.
+
 ## Standards summary
 
 - **Least privilege, always** — scoped ARNs, no `*`, boundaries, Access Analyzer.
