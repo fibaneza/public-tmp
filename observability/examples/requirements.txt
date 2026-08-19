@@ -1,0 +1,17 @@
+# FastAPI + LiteLLM + CloudWatch observability stack.
+#   pip install -r requirements.txt
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+
+litellm>=1.55                 # router/proxy; provides response_cost + callbacks
+anthropic>=0.40               # only if you also call a provider SDK directly
+
+boto3>=1.35                   # CloudWatch alarms, DynamoDB session store
+aws-embedded-metrics>=3.2     # optional: EMF helper (this repo emits EMF by hand)
+
+# Distributed tracing (optional — see the tracing section of the document)
+opentelemetry-sdk>=1.27
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-exporter-otlp-proto-grpc>=1.27

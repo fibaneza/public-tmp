@@ -1,0 +1,740 @@
+= LLM Observability on AWS: FastAPI, LiteLLM and ECS
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Logging, tracing, cost attribution and alerting for an LLM service built on
+FastAPI, routed through LiteLLM, running on ECS Fargate, with metrics in
+CloudWatch and no Grafana.
+
+This is the concrete implementation of the tracing discipline described in
+xref:../rag/RAG_Operations.adoc[RAG Production Operations] — it applies to any
+LLM application, not only RAG.
+
+📁 Runnable code: xref:examples/README.adoc[`examples/`]
+
+== What This Has to Answer
+
+Five questions, and every design decision below follows from one of them:
+
+[cols="1,3", options="header"]
+|===
+|Question |Needs
+
+|"What did this user cost us last month?"
+|Cost attributed to an authenticated identity, at unlimited cardinality
+
+|"Why was that answer slow?"
+|Latency split into *our* time and *the provider's* time
+
+|"What happened in this conversation?"
+|A session id joining every request, log line and metric
+
+|"Is something wrong right now?"
+|Alarms on low-cardinality metrics
+
+|"Which user is burning the budget?"
+|Query over high-cardinality properties
+|===
+
+The tension between the last two is the whole problem. CloudWatch charges per
+unique metric, so the thing you want to alarm on and the thing you want to slice
+by cannot use the same mechanism. Section 6 is where that gets resolved.
+
+== Architecture
+
+[mermaid]
+....
+flowchart TB
+    U([Client]) -->|"Bearer token"| ALB[ALB]
+
+    subgraph ECS["ECS Fargate — llm-gateway"]
+        direction TB
+        MW["FastAPI middleware<br/>mint request_id + trace_id<br/>resolve user from TOKEN"]
+        MW --> SES["Session: get or create<br/>DynamoDB"]
+        SES --> CALL["litellm.acompletion(<br/>  metadata={user_id, session_id,<br/>  request_id, trace_id})"]
+        CALL --> CB["LiteLLM callback<br/>cost · tokens · model latency"]
+        CB --> EMF["stdout: EMF JSON<br/>+ structured logs"]
+    end
+
+    ALB --> MW
+    CALL -->|https| PROV[(Provider APIs<br/>via LiteLLM router)]
+
+    EMF -->|awslogs driver| CWL[(CloudWatch Logs)]
+    CWL -->|"automatic EMF<br/>extraction"| CWM[(CloudWatch Metrics)]
+    CWL -->|"Logs Insights<br/>on demand"| Q["Per-user cost<br/>Session forensics"]
+    CWM --> AL[Alarms] --> SNS[SNS → PagerDuty / Slack]
+
+    SES -.-> DDB[(DynamoDB<br/>sessions)]
+
+    style ECS fill:#e8f0fe,stroke:#4285f4
+    style CWM fill:#e6f4ea,stroke:#34a853
+    style Q fill:#fef7e0,stroke:#fbbc04
+....
+
+The load-bearing detail: *the container never calls the CloudWatch API*. Metrics
+travel out through the log driver you already have. No `PutMetricData` in the
+request path means no added latency, no throttling, no retry logic, and one
+fewer IAM permission.
+
+== The Identity Chain
+
+Nothing works without this. Four ids established once per request, carried
+everywhere.
+
+[cols="1,2,2", options="header"]
+|===
+|Id |Scope |Source
+
+|`request_id`
+|One HTTP request
+|Minted in middleware, returned as `x-request-id`
+
+|`trace_id`
+|One distributed trace
+|Inherited from `x-amzn-trace-id` / `traceparent` if present, else minted
+
+|`session_id`
+|One conversation
+|Created by FastAPI, returned to the client, replayed on the next turn
+
+|`user_id`
+|The authenticated user
+|*From the validated token. Never from the request body.*
+|===
+
+That last row is not pedantry. A `user_id` the client can set makes every cost
+figure, every budget and every access decision downstream a client-controlled
+value — see
+xref:../rag/RAG_Security.adoc#_access_control[RAG Security].
+
+`contextvars` is the right carrier under FastAPI: async-native, and each request
+gets its own copy, so concurrent requests cannot read each other's identity. A
+module-level global absolutely would.
+
+[source,python]
+----
+_ctx: ContextVar["RequestContext | None"] = ContextVar("request_context", default=None)
+
+@app.middleware("http")
+async def correlation_middleware(request: Request, call_next):
+    request_id, trace_id = new_ids()
+    incoming = request.headers.get("x-amzn-trace-id") or request.headers.get("traceparent")
+    set_context(RequestContext(request_id=request_id, trace_id=incoming or trace_id,
+                               user_id="anonymous", session_id="",
+                               route=request.url.path))
+    ...
+----
+
+📄 xref:examples/context.py[`examples/context.py`] ·
+xref:examples/app.py[`examples/app.py`]
+
+== Session Management: Created in FastAPI, Shared with LiteLLM
+
+You asked whether the session can be shared with LiteLLM. The honest answer
+shapes the design: *LiteLLM has no session concept of its own.* It is stateless
+per call. So the session is yours — FastAPI mints the id and owns the history —
+and LiteLLM receives the id as *metadata*, which is what lets it label telemetry
+without owning any state.
+
+[mermaid]
+....
+sequenceDiagram
+    participant C as Client
+    participant F as FastAPI
+    participant D as DynamoDB
+    participant L as LiteLLM
+    participant P as Provider
+
+    C->>F: POST /chat {message}  (no session_id)
+    F->>D: create session ses_abc
+    F->>L: acompletion(messages, metadata={session_id: ses_abc,<br/>user_id, request_id, trace_id})
+    L->>P: provider call
+    P-->>L: response + usage
+    L-->>F: response
+    Note over L: callback fires with kwargs + usage<br/>+ start/end time → emits EMF<br/>labelled with session_id and user_id
+    F->>D: append turn, running cost
+    F-->>C: {reply, session_id: ses_abc}
+
+    C->>F: POST /chat {message, session_id: ses_abc}
+    F->>D: load history (scoped to user_id)
+    Note over F,D: the user_id check is not belt-and-braces —<br/>a session id is a bearer token for a conversation
+....
+
+The one line that makes cost attribution possible:
+
+[source,python]
+----
+response = await litellm.acompletion(
+    model=body.model or DEFAULT_MODEL,
+    messages=session.messages + [{"role": "user", "content": body.message}],
+    metadata={                        # ← travels into the callback
+        "user_id": ctx.user_id,
+        "session_id": ctx.session_id,
+        "request_id": ctx.request_id,
+        "trace_id": ctx.trace_id,
+        "tenant_id": ctx.tenant_id,
+        "route": ctx.route,
+    },
+)
+----
+
+=== SDK In-Process or Proxy as a Separate Service
+
+[cols="1,2,2", options="header"]
+|===
+|
+|LiteLLM SDK in the FastAPI container
+|LiteLLM Proxy as its own ECS service
+
+|Metadata
+|`metadata={...}` directly
+|`extra_body={"metadata": {...}}`, or `x-litellm-*` headers
+
+|Callbacks run
+|In your process — same log stream, same EMF pipeline
+|In the proxy — a *second* log group to correlate
+
+|Key management
+|Each service holds provider keys
+|Centralised; services get virtual keys
+
+|Rate limiting / budgets
+|You build it
+|Built in, per virtual key
+
+|Extra hop
+|None
+|~5-15 ms plus another thing to run
+
+|Choose when
+|One or two services; you want the simplest trace
+|Many services, or you want central key rotation and budgets
+|===
+
+*Start with the SDK in-process.* The proxy earns its place when several services
+share providers and you want key rotation and budgets in one spot — but note
+that it splits your telemetry across two log groups, so `trace_id` must
+propagate as a header or you lose the join.
+
+Passing metadata through the proxy:
+
+[source,python]
+----
+# Proxy mode — metadata rides in extra_body, not as a top-level kwarg
+response = await litellm.acompletion(
+    model="claude-opus-5",
+    messages=messages,
+    api_base="http://litellm-proxy.internal:4000",
+    api_key=VIRTUAL_KEY,
+    extra_body={"metadata": {"user_id": ..., "session_id": ..., "trace_id": ...}},
+)
+----
+
+📄 xref:examples/sessions.py[`examples/sessions.py`]
+
+*Why DynamoDB rather than an in-process dict:* Fargate replaces tasks routinely
+— deploys, scaling, spot reclamation, health-check failures. A session in
+process memory dies with the task, and the user's conversation restarts
+mid-flow. Single-key get/put, TTL eviction and no connection pool make DynamoDB
+a good fit; ElastiCache is the other reasonable choice.
+
+== Capturing Cost, Tokens, Model and Timings
+
+LiteLLM fires a callback around every call, receiving the request kwargs, the
+response, and start/end timestamps. That is the only place that sees *both* the
+metadata FastAPI attached *and* the usage the provider returned — so it is where
+attribution has to happen.
+
+[source,python]
+----
+class LLMTelemetryHandler(CustomLogger):
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        self._record(kwargs, response_obj, start_time, end_time, status="success")
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        self._record(kwargs, response_obj, start_time, end_time, status="error")
+
+litellm.callbacks = [LLMTelemetryHandler(environment="prod")]
+----
+
+=== Two Timings That Are Not the Same Number
+
+[mermaid]
+....
+gantt
+    title One request, two measurements
+    dateFormat X
+    axisFormat %s
+
+    section Total latency (FastAPI middleware)
+    auth + session load        :0, 40
+    retrieval / prep           :40, 90
+    model call                 :90, 2200
+    persist + serialise        :2200, 2260
+
+    section Model latency (LiteLLM callback)
+    provider round trip        :90, 2200
+
+    section What the user feels
+    time to first token        :90, 520
+....
+
+* *`model_latency`* — `end_time - start_time` in the callback. Provider time only.
+* *`total_latency`* — measured in middleware. Includes auth, session load,
+  retrieval, serialisation, and any retry LiteLLM performed internally.
+* *`ttft`* — on streaming, the only one users perceive.
+
+Report only the first and you hide your own overhead. Report only the second and
+a provider slowdown looks identical to a regression in your code. *Emit both*;
+`total − model` is your overhead, and it is the number that tells you whether to
+optimise your service or change provider.
+
+=== Cache Tokens Are Not Input Tokens
+
+Cached input is billed at roughly a tenth of the input rate, and cache *writes*
+at a premium. Folding them into one `input_tokens` figure makes per-user cost
+wrong in both directions — understating heavy cache users and overstating
+first-call users.
+
+[cols="1,2,2", options="header"]
+|===
+|Field |Meaning |Billing
+
+|`prompt_tokens` / `input_tokens`
+|Uncached input
+|Full input rate
+
+|`cache_read_input_tokens`
+|Served from cache
+|~0.1x input rate
+
+|`cache_creation_input_tokens`
+|Written to cache
+|~1.25x input rate
+
+|`completion_tokens` / `output_tokens`
+|Generated
+|Output rate
+|===
+
+The exact field names vary by provider and LiteLLM version, so normalise rather
+than reaching for one attribute:
+
+[source,python]
+----
+prompt_details = getattr(usage, "prompt_tokens_details", None)
+cache_read = getattr(usage, "cache_read_input_tokens", 0)
+if not cache_read and prompt_details is not None:
+    cache_read = getattr(prompt_details, "cached_tokens", 0)
+----
+
+=== Cost
+
+LiteLLM computes cost from its own pricing map and puts it on the callback
+kwargs. Fall back rather than trusting one path — a pricing-map gap for a
+brand-new model must not take down the request:
+
+[source,python]
+----
+cost = kwargs.get("response_cost")
+if cost is None:
+    cost = litellm.completion_cost(completion_response=response_obj) or 0.0
+----
+
+*Verify the pricing map against your provider's published rates before trusting
+the numbers.* It is community-maintained and lags new model releases; a model it
+does not know reports zero, which looks like free rather than like missing data.
+Emit a `cost_source` property so you can tell "genuinely cheap" from
+"unpriced" later.
+
+📄 xref:examples/litellm_callback.py[`examples/litellm_callback.py`]
+
+=== Streaming Loses Usage Unless You Ask For It
+
+[source,python]
+----
+stream = await litellm.acompletion(
+    model=..., messages=..., stream=True,
+    stream_options={"include_usage": True},   # ← without this: zero tokens, zero cost
+    metadata={...},
+)
+----
+
+A silent hole in per-user accounting that is easy to ship and hard to notice —
+the dashboards look fine, they just under-count.
+
+== CloudWatch Without Grafana: Embedded Metric Format
+
+EMF is a JSON shape you write to *stdout*. The `awslogs` driver ships it to
+CloudWatch Logs, and CloudWatch extracts metrics from it automatically.
+
+[mermaid]
+....
+flowchart LR
+    APP["print(json)<br/>one line, with an _aws node"] --> DRV[awslogs<br/>log driver]
+    DRV --> CWL[(CloudWatch Logs)]
+    CWL --> EXT{{"automatic EMF<br/>extraction"}}
+    EXT --> MET[(Metrics)] --> ALM[Alarms]
+    CWL --> LI["Logs Insights<br/>same record, full context"]
+
+    N["No PutMetricData call:<br/>no latency, no throttling,<br/>no IAM permission,<br/>metric and context in ONE record"] -.-> APP
+
+    style EXT fill:#e6f4ea,stroke:#34a853
+    style N fill:#e8f0fe,stroke:#4285f4
+....
+
+[source,json]
+----
+{
+  "_aws": {
+    "Timestamp": 1755640000000,
+    "CloudWatchMetrics": [{
+      "Namespace": "LLMPlatform",
+      "Dimensions": [["Environment","Model"], ["Environment","Route"]],
+      "Metrics": [
+        {"Name": "CostMicroUSD", "Unit": "Count"},
+        {"Name": "ModelLatency", "Unit": "Milliseconds"}
+      ]
+    }]
+  },
+  "Environment": "prod",
+  "Model": "claude-opus-5",
+  "Route": "/chat",
+  "CostMicroUSD": 4820,
+  "ModelLatency": 2104.3,
+
+  "user_id": "u_9f21",
+  "session_id": "ses_abc",
+  "request_id": "req_77c1",
+  "trace_id": "1-6650-..."
+}
+----
+
+The top block becomes metrics. The bottom block is *just fields on the log
+record* — free, unlimited cardinality, queryable.
+
+=== The Cardinality Trap
+
+*This is the section that matters most.* Every unique combination of dimension
+**values** creates a separate CloudWatch custom metric, billed monthly, forever.
+
+[cols="1,2,2", options="header"]
+|===
+|
+|Dimension
+|Property
+
+|Cardinality
+|Must be bounded
+|Unlimited
+
+|Creates a metric
+|✅ one per unique value combination
+|❌ never
+
+|Cost
+|Per custom metric, per month
+|Log storage only
+
+|Can alarm on it
+|✅
+|❌ (query, then publish a metric)
+
+|Use for
+|`Environment`, `Model`, `Route`, `Status`, `Provider`
+|`user_id`, `session_id`, `request_id`, `trace_id`
+|===
+
+[mermaid]
+....
+flowchart TB
+    Q{"Do I need to ALARM<br/>on this field directly?"}
+    Q -->|no| P["**Property**<br/>free · unlimited cardinality<br/>query with Logs Insights"]
+    Q -->|yes| C{"Is the set of values<br/>bounded and small?"}
+    C -->|"yes — 4 models,<br/>3 routes, 2 statuses"| D["**Dimension**<br/>~30 metrics ≈ £9/month"]
+    C -->|"no — 20,000 users"| X["❌ **NOT a dimension**<br/>20,000 users × 4 models<br/>= 80,000 custom metrics<br/>= five figures per month<br/><br/>Use a scheduled Logs Insights<br/>query instead"]
+
+    style P fill:#e6f4ea,stroke:#34a853
+    style D fill:#e6f4ea,stroke:#34a853
+    style X fill:#fce8e6,stroke:#ea4335
+....
+
+Putting `user_id` in `Dimensions` is the single most expensive mistake available
+in this design, and nothing warns you — it works perfectly in staging with three
+test users and arrives as a bill.
+
+The example code refuses to let a field be both:
+
+[source,python]
+----
+overlap = set(properties) & set(dimensions)
+if overlap:
+    raise ValueError(f"fields declared as both dimension and property: {overlap}")
+----
+
+=== Practical EMF Rules
+
+[cols="1,3", options="header"]
+|===
+|Rule |Why
+
+|One line, no indentation
+|The log driver splits on newlines; a pretty-printed record becomes N broken events and zero metrics
+
+|`Timestamp` in epoch **milliseconds**
+|Seconds silently place your metrics in 1970
+
+|Money in integer micro-dollars
+|CloudWatch statistics on values around 1e-4 graph as a flat zero line
+
+|≤ 100 metrics, ≤ 30 dimensions per record
+|Hard EMF limits; exceeding them drops the record
+
+|`PYTHONUNBUFFERED=1`
+|Otherwise Python buffers stdout and metrics arrive in bursts, or not at all when a task is killed
+
+|Set log-group retention explicitly
+|The default is "never expire" — quietly the largest line on the observability bill
+|===
+
+📄 xref:examples/emf.py[`examples/emf.py`]
+
+== Per-User Cost
+
+Cost per user is a *query*, not a metric. That is the resolution of the tension
+in section 1, and it is both cheaper and more flexible.
+
+[source,sql]
+----
+fields user_id, CostMicroUSD / 1000000 as cost_usd, InputTokens, OutputTokens
+| filter ispresent(CostMicroUSD)
+| stats sum(cost_usd) as total_usd,
+        sum(InputTokens) as tokens_in,
+        sum(OutputTokens) as tokens_out,
+        count(*) as calls
+  by user_id
+| sort total_usd desc
+| limit 50
+----
+
+Other queries worth having ready — all in
+xref:examples/alarms.py[`examples/alarms.py`]:
+
+[cols="1,3", options="header"]
+|===
+|Query |Answers
+
+|`cost_per_user_per_model`
+|"Is this user expensive because of volume, or because they hit the big model?"
+
+|`cache_savings`
+|Cache hit rate and what it saved — justifies the caching work
+
+|`session_forensics`
+|Every call in one conversation, in order, with cost and latency
+
+|`trace`
+|Every log line for one `request_id` — the debugging entry point
+
+|`model_overhead`
+|`TotalLatency − ModelLatency` per model: *your* overhead, isolated
+
+|`slowest_users`
+|p95 by user — usually reveals one integration doing something pathological
+
+|`errors_by_user`
+|Whether failures are systemic or one caller
+|===
+
+=== Enforcing a Per-User Budget
+
+Alarms cannot watch a query. Bridge it with a scheduled Lambda:
+
+[mermaid]
+....
+flowchart LR
+    EB["EventBridge<br/>rate(1 hour)"] --> L["Lambda:<br/>run cost_per_user query"]
+    L --> D{"any user over<br/>their budget?"}
+    D -->|yes| PM["PutMetricData<br/>UsersOverBudget = N<br/>+ user ids in the log"]
+    D -->|no| PM2["PutMetricData<br/>UsersOverBudget = 0"]
+    PM --> A[Alarm ≥ 1] --> SNS[SNS]
+    PM --> DDB[(Write a flag to<br/>DynamoDB → API returns 429)]
+
+    style L fill:#fef7e0,stroke:#fbbc04
+....
+
+`UsersOverBudget` is a *count*, so it is one metric regardless of how many users
+you have. The identities live in the Lambda's log line, where cardinality is
+free. This is the pattern for any high-cardinality alerting need.
+
+== Alarms
+
+[cols="1,2,2", options="header"]
+|===
+|Alarm |Metric |Catches
+
+|Hourly spend
+|`Sum(CostMicroUSD)`, 1h
+|Budget overrun, runaway loop
+
+|Spend anomaly
+|`ANOMALY_DETECTION_BAND`
+|A step change at any absolute level — what a fixed threshold misses as normal spend grows
+
+|p95 latency
+|`p95(TotalLatency)`
+|Degradation users feel
+
+|p95 TTFT
+|`p95(TimeToFirstToken)`
+|The streaming experience
+
+|Error *rate*
+|Metric math: `errors / total`
+|50 errors is fine at 100k calls and catastrophic at 200 — a raw count cannot express that
+
+|Degraded (composite)
+|`error-rate AND p95-latency`
+|Pages only when both are bad, suppressing the noise that trains people to ignore the pager
+|===
+
+Two details that catch people out:
+
+[source,python]
+----
+# Percentiles use ExtendedStatistic, not Statistic — passing "p95" to
+# Statistic is rejected.
+cw.put_metric_alarm(..., ExtendedStatistic="p95", ...)
+
+# Guard a ratio against low denominators, or one error in three calls
+# pages someone at 03:00.
+{"Id": "rate", "Expression": "IF(total > 20, 100 * errors / total, 0)"}
+----
+
+Set `TreatMissingData="notBreaching"` on anything that can legitimately go
+quiet, or every low-traffic period alarms.
+
+📄 xref:examples/alarms.py[`examples/alarms.py`] — `python alarms.py create`
+
+== ECS Specifics
+
+[cols="1,3", options="header"]
+|===
+|Concern |Handling
+
+|Log driver
+|`awslogs` with `mode=non-blocking` and `max-buffer-size=25m`, so a CloudWatch slowdown cannot block the app. Trade-off: logs *can* be dropped under sustained pressure — fine for telemetry, not for an audit log
+
+|Buffering
+|`PYTHONUNBUFFERED=1`. Without it a killed task loses its last metrics
+
+|Provider keys
+|`secrets` from Secrets Manager, never `environment` — env vars appear in the console, in `DescribeTaskDefinition` and in CI logs
+
+|Task role
+|Needs DynamoDB only. *No `cloudwatch:PutMetricData`* — EMF goes through logs
+
+|Health check
+|`/healthz` makes no LLM call. A health check that does inference bills you per probe, per task, forever
+
+|Graceful shutdown
+|`stopTimeout: 120` so in-flight LLM calls finish and their telemetry flushes
+
+|Log retention
+|Set it explicitly — the default never expires
+
+|Container Insights
+|Enable for CPU/memory; it is separate from your application metrics
+|===
+
+📄 xref:examples/ecs_task_definition.json[`examples/ecs_task_definition.json`]
+
+=== Distributed Tracing
+
+EMF plus a `trace_id` property gives you correlation. For genuine span-level
+tracing across FastAPI → proxy → provider, add OpenTelemetry with the ADOT
+collector as an ECS sidecar, exporting to X-Ray:
+
+[source,python]
+----
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+FastAPIInstrumentor.instrument_app(app)
+----
+
+Worth it when you run the proxy as a separate service, since that is where
+correlation-by-id becomes tedious. With the SDK in-process, the `trace_id`
+property is usually enough.
+
+== What the Observability Itself Costs
+
+Budget it, or it becomes a surprise line item:
+
+[cols="1,2,3", options="header"]
+|===
+|Component |Driver |Keeping it small
+
+|Custom metrics
+|Unique dimension combinations
+|Bounded dimensions only. ~30 metrics is fine; 80,000 is a crisis
+
+|Log ingestion
+|GB written
+|Do not log prompt or completion *text* by default — it is the bulk of the volume, and it is a copy of user data in a store with different access rules
+
+|Log storage
+|GB × retention
+|Set retention explicitly. 30 days is usually plenty; export to S3 for anything longer
+
+|Logs Insights
+|GB scanned per query
+|Narrow the time range; sortable ids (ULIDs) make range scans cheaper than random UUIDs
+
+|Alarms
+|Per alarm
+|Trivial next to the rest
+|===
+
+*The prompt-text decision is the significant one.* Logging full prompts and
+completions is the most useful thing for debugging and the most expensive and
+most sensitive thing you can do. A reasonable middle: log a hash and the token
+count always, the full text only behind a sampling flag or for flagged requests,
+and never for tenants who have opted out. See
+xref:../rag/RAG_Security.adoc#_sensitive_data_in_the_index[RAG Security].
+
+== Checklist
+
+. Is `user_id` derived from the validated token, never the request body?
+. Is `user_id` a *property* everywhere, and absent from every `Dimensions` list?
+. Does every `litellm` call pass `metadata` with the full identity chain?
+. Do streaming calls set `stream_options={"include_usage": True}`?
+. Are cache-read and cache-write tokens tracked separately from input tokens?
+. Are *both* `model_latency` and `total_latency` emitted?
+. Is EMF written as one line, with a millisecond timestamp?
+. Is `PYTHONUNBUFFERED=1` set on the task?
+. Is log-group retention set explicitly?
+. Are provider keys in `secrets`, not `environment`?
+. Does the health check avoid making an LLM call?
+. Do ratio alarms guard against low denominators?
+. Is there a documented decision about logging prompt text?
+. Can you go from a user complaint to the exact request in one Logs Insights query?
+
+That last one is the test. If you cannot, the rest is decoration —
+xref:../rag/RAG_Operations.adoc#_tracing_one_bad_answer[Tracing one bad answer].
+
+== Resources
+
+* link:https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format_Specification.html[CloudWatch EMF specification]
+* link:https://github.com/awslabs/aws-embedded-metrics-python[aws-embedded-metrics-python]
+* link:https://docs.litellm.ai/docs/observability/custom_callback[LiteLLM custom callbacks] ·
+  link:https://docs.litellm.ai/docs/proxy/logging[proxy logging]
+* link:https://github.com/BerriAI/litellm[BerriAI/litellm]
+* link:https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/AnalyzingLogData.html[CloudWatch Logs Insights query syntax]
+* link:https://aws-otel.io/docs/getting-started/ecs[ADOT collector on ECS]
+* link:https://docs.aws.amazon.com/AmazonECS/latest/developerguide/using_awslogs.html[ECS awslogs log driver]
+* xref:../rag/RAG_Operations.adoc[RAG Production Operations] ·
+  xref:../rag/RAG_Cost_Latency.adoc[Cost and Latency Budgeting]

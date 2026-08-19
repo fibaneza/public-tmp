@@ -1,0 +1,87 @@
+{
+  "_comment": "ECS Fargate task definition for the FastAPI + LiteLLM gateway. The awslogs driver ships stdout to CloudWatch Logs, where EMF records are turned into metrics automatically — no PutMetricData, no metrics agent, no sidecar.",
+
+  "family": "llm-gateway",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+
+  "executionRoleArn": "arn:aws:iam::123456789012:role/llmGatewayExecutionRole",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/llmGatewayTaskRole",
+
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "123456789012.dkr.ecr.eu-west-1.amazonaws.com/llm-gateway:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
+
+      "environment": [
+        { "name": "ENVIRONMENT", "value": "prod" },
+        { "name": "LLM_MODEL", "value": "claude-opus-5" },
+        { "name": "SESSION_TABLE", "value": "llm-sessions" },
+        { "name": "LOG_GROUP", "value": "/ecs/llm-gateway" },
+        { "name": "PYTHONUNBUFFERED", "value": "1" }
+      ],
+
+      "_comment_secrets": "Never put provider keys in `environment` — they are visible in the console, in DescribeTaskDefinition, and in every CI log that prints the task def.",
+      "secrets": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:eu-west-1:123456789012:secret:llm/anthropic-key"
+        }
+      ],
+
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/llm-gateway",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "api",
+          "_comment": "mode=non-blocking stops a CloudWatch Logs slowdown from blocking the application; max-buffer-size caps memory. The trade-off is that logs CAN be dropped under sustained pressure — acceptable for telemetry, not for an audit log you must retain.",
+          "mode": "non-blocking",
+          "max-buffer-size": "25m"
+        }
+      },
+
+      "healthCheck": {
+        "_comment": "Hits /healthz, which makes no LLM call. A health check that does inference bills you per probe, on every task, forever.",
+        "command": ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      },
+
+      "stopTimeout": 120
+    }
+  ],
+
+  "_comment_iam_task_role": "The TASK role is what application code uses. Minimum policy for this app:",
+  "_iam_task_role_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "SessionStore",
+        "Effect": "Allow",
+        "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query"],
+        "Resource": [
+          "arn:aws:dynamodb:eu-west-1:123456789012:table/llm-sessions",
+          "arn:aws:dynamodb:eu-west-1:123456789012:table/llm-sessions/index/*"
+        ]
+      },
+      {
+        "Sid": "LogsInsightsForBudgetLambdaOnly",
+        "_comment": "The API itself does NOT need logs:StartQuery — only the scheduled budget Lambda does. Keep them separate.",
+        "Effect": "Allow",
+        "Action": ["logs:StartQuery", "logs:GetQueryResults"],
+        "Resource": "arn:aws:logs:eu-west-1:123456789012:log-group:/ecs/llm-gateway:*"
+      }
+    ]
+  },
+
+  "_comment_no_putmetricdata": "Note the absence of cloudwatch:PutMetricData. With EMF the container never calls the CloudWatch API — metrics arrive through the log pipeline. That is one less permission, one less failure mode, and no added request latency.",
+
+  "_comment_log_retention": "Set retention on the log group explicitly — the default is 'never expire', which quietly becomes the largest line on the observability bill: aws logs put-retention-policy --log-group-name /ecs/llm-gateway --retention-in-days 30"
+}
