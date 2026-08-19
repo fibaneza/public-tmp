@@ -1,0 +1,438 @@
+= RAG Production Operations
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+xref:RAG_Evaluation.adoc[Evaluation] tells you whether the system is good *in
+aggregate*. This document is about the other half of running one: a specific user
+says a specific answer was wrong, the index has quietly drifted from the source
+of truth, or you need to swap an embedding model without a weekend of downtime.
+
+The distinguishing operational property of RAG is that *it degrades silently*. A
+web service that breaks returns a 500. A RAG system that breaks returns a fluent,
+confident, plausible answer built from the wrong chunks — and nothing in your
+error rate moves.
+
+== Tracing One Bad Answer
+
+The single most valuable operational capability, and the one most systems lack:
+being able to answer "why did it say that?" without re-running anything.
+
+=== What to Log
+
+Every answer needs a trace with a stable id the user can quote back to you.
+
+[source,python]
+----
+{
+    "trace_id": "01HQ...",              # surfaced in the UI — "report this answer"
+    "principal": "u_1234",              # who asked, for ACL reproduction
+    "question": "how long for a refund?",
+    "rewritten_query": "refund eligibility window",   # null if not rewritten
+    "retrieval": {
+        "candidate_ids": ["c3", "c7", "c1", ...],     # pre-rerank, in order
+        "candidate_scores": [0.71, 0.68, ...],
+        "reranked_ids": ["c3", "c1"],                 # post-rerank, in order
+        "final_ids": ["c3", "c1"],                    # what reached the prompt
+        "acl_filter": {"acl_groups": {"$in": ["support"]}},
+    },
+    "context_chars": 1840,
+    "claims": [{"text": "...", "source_ids": ["c3"], "verified": true}],
+    "timings_ms": {"rewrite": 0, "retrieve": 14, "rerank": 81, "generate": 2104},
+    "versions": {                       # the part people forget
+        "embedding_model": "bge-m3@1.0",
+        "reranker": "bge-reranker-v2-m3",
+        "generator": "<model-id>",
+        "prompt": "answer_v7",
+        "index_snapshot": "2026-08-19T04:00Z",
+    },
+}
+----
+
+The `versions` block is what makes a trace from three weeks ago interpretable.
+Without it, "this used to work" is unfalsifiable — you cannot tell whether the
+prompt changed, the index was rebuilt, or the provider silently updated a model
+behind the same name.
+
+*Do not log the retrieved chunk text* in most environments — it is a copy of your
+corpus, with the corpus's sensitivity, landing in a log store with different
+retention and access rules. Log the ids and resolve them on demand, through the
+same ACL check as retrieval. See
+xref:RAG_Security.adoc#_sensitive_data_in_the_index[Sensitive data in the index].
+
+=== The Debugging Decision Tree
+
+Given a trace, the diagnosis is mechanical. The order matters — it walks the
+pipeline backwards from the symptom to the earliest stage that could have caused
+it.
+
+[mermaid]
+....
+flowchart TB
+    S([User reports a bad answer]) --> Q1{Is the correct chunk<br/>in final_ids?}
+
+    Q1 -->|yes| G["**GENERATION** problem<br/>The model had the answer<br/>and did not use it"]
+    G --> G1["Check: was the chunk buried<br/>mid-context? (lost in the middle)<br/>Did compression trim the<br/>qualifying clause?<br/>Is the prompt ambiguous?<br/>Did verification pass on a<br/>claim it should have failed?"]
+
+    Q1 -->|no| Q2{Is it in<br/>candidate_ids?}
+
+    Q2 -->|yes| R["**RANKING** problem<br/>Retrieval found it,<br/>reranking demoted it"]
+    R --> R1["Check: is the chunk longer than<br/>the cross-encoder window?<br/>(silent truncation)<br/>Is rerank_to too small?<br/>Did MMR drop it as redundant?"]
+
+    Q2 -->|no| Q3{Does the chunk<br/>exist in the index?}
+
+    Q3 -->|no| I["**INGESTION** problem<br/>The document never<br/>made it in"]
+    I --> I1["Check the dead-letter queue<br/>and the document registry.<br/>Parse failure? Filtered by<br/>a PII rule? Never crawled?"]
+
+    Q3 -->|yes| Q4{Does the ACL filter<br/>exclude it?}
+
+    Q4 -->|yes| A["**PERMISSION** problem<br/>— or correct behaviour"]
+    A --> A1["Is the user supposed to<br/>see it? If yes, this is<br/>permission drift"]
+
+    Q4 -->|no| RET["**RETRIEVAL** problem<br/>It is there, visible,<br/>and was not found"]
+    RET --> RET1["Search for it directly.<br/>Does BM25 find it but dense<br/>does not, or neither?<br/>Is the chunk missing the<br/>context that makes it match?"]
+
+    style G fill:#f3e8fd,stroke:#a142f4
+    style R fill:#fce8e6,stroke:#ea4335
+    style I fill:#fef7e0,stroke:#fbbc04
+    style A fill:#e8f0fe,stroke:#4285f4
+    style RET fill:#e6f4ea,stroke:#34a853
+....
+
+Two branches deserve emphasis because they are the ones teams misdiagnose:
+
+*"The right chunk was in the context and the model ignored it"* is a generation
+problem, and the reflex — tune retrieval — makes it worse by adding more chunks.
+Check position first: if it was buried in the middle of ten chunks, the fix is
+fewer chunks and xref:RAG_Techniques.adoc#_contextual_compression[edge-weighted
+ordering], not better retrieval.
+
+*"It was in candidates but not in final"* usually means the cross-encoder
+truncated it. A 2,000-token parent chunk scored by a 512-token reranker is
+ranked on its first quarter, silently. Rerank children, expand to parents.
+
+=== A Triage Tool
+
+Make the trace queryable rather than a blob in a log line. The minimum useful
+tool is one command that takes a `trace_id` and a "what should it have said" and
+prints where the expected chunk fell out:
+
+[source,python]
+----
+def diagnose(trace_id: str, expected_text: str) -> str:
+    """Locate the stage at which the expected content was lost."""
+    trace = traces.get(trace_id)
+    hits = search_corpus_verbatim(expected_text)          # does it exist at all?
+    if not hits:
+        return "INGESTION: no chunk in the index contains this text"
+    ids = {c.id for c in hits}
+
+    if ids & set(trace["retrieval"]["final_ids"]):
+        return "GENERATION: the model was given this and did not use it"
+    if ids & set(trace["retrieval"]["candidate_ids"]):
+        return "RANKING: retrieved, then demoted by the reranker"
+    if not passes_acl(hits, trace["principal"]):
+        return "PERMISSION: excluded by the ACL filter"
+    return "RETRIEVAL: indexed and visible, but not retrieved"
+----
+
+This is a thirty-line tool that converts a support ticket from a debate into a
+one-word answer. It is the highest-return operational investment in this
+document.
+
+== Drift
+
+The index is a *copy*. Copies rot, and nothing in the query path notices.
+
+[mermaid]
+....
+flowchart TB
+    subgraph D["Four kinds of drift"]
+        direction TB
+        D1["**Corpus drift**<br/>Source documents changed,<br/>index did not"]
+        D2["**Permission drift**<br/>ACLs changed at source,<br/>chunk metadata did not"]
+        D3["**Query drift**<br/>Users started asking about<br/>things the corpus never covered"]
+        D4["**Model drift**<br/>Provider updated a model<br/>behind the same name"]
+    end
+
+    D1 --> R1["Detect: nightly reconciliation —<br/>diff (doc_id, content_hash)<br/>between source and registry"]
+    D2 --> R2["Detect: re-resolve a sample of<br/>chunk ACLs against the IdP<br/>and alert on mismatch"]
+    D3 --> R3["Detect: rising 'no results' and<br/>refusal rates; cluster the<br/>unanswered queries"]
+    D4 --> R4["Detect: pin model ids; re-run the<br/>eval suite on a schedule,<br/>not only on your own changes"]
+
+    style D fill:#fce8e6,stroke:#ea4335
+....
+
+*Corpus drift is the one that silently destroys trust.* A policy changes, the
+webhook that should have re-indexed it failed six weeks ago, and the system has
+been confidently quoting the old policy — with a citation, which makes it *more*
+convincing. A nightly job that diffs `(doc_id, content_hash)` between the source
+of truth and the document registry, and reports the delta, is cheap and catches
+the entire class.
+
+[source,python]
+----
+def reconcile() -> dict:
+    """Nightly: what does the source have that the index does not, and vice versa?"""
+    source = {d.doc_id: d.content_hash for d in source_system.list_documents()}
+    indexed = {d["doc_id"]: d["content_hash"] for d in registry.list_documents()}
+
+    return {
+        "missing":   sorted(set(source) - set(indexed)),        # never ingested
+        "orphaned":  sorted(set(indexed) - set(source)),        # deleted at source, still answering
+        "stale":     sorted(k for k in set(source) & set(indexed)
+                            if source[k] != indexed[k]),        # changed, not re-indexed
+    }
+----
+
+Alert on all three. `orphaned` is the security-relevant one: a document deleted
+at the source that still answers queries is a disclosure, not just a staleness
+bug.
+
+*Model drift* deserves its own note. If your generator or embedding model is a
+hosted endpoint referenced by a floating name, its behaviour can change without
+any deploy on your side. Pin explicit versions where the provider offers them,
+and schedule the eval suite to run on a timer rather than only on your own pull
+requests — otherwise the first signal is a user complaint.
+
+== Migrations
+
+Some changes invalidate the whole index — a new embedding model, a new chunker, a
+changed Contextual Retrieval prompt. Done naively, that is downtime; done as a
+migration, it is a switch.
+
+=== Dual-Write, Shadow, Switch
+
+[mermaid]
+....
+flowchart TB
+    subgraph P1["① Build alongside"]
+        A1["Index into collection v2<br/>while v1 serves all reads"]
+    end
+    subgraph P2["② Shadow"]
+        A2["Send a % of live queries to<br/>BOTH; compare rankings offline.<br/>Users see v1 only"]
+    end
+    subgraph P3["③ Evaluate"]
+        A3["Run the eval suite against v2.<br/>Gate on hit-rate@k, MRR, and<br/>the negative cases"]
+    end
+    subgraph P4["④ Canary"]
+        A4["Route 5% of traffic to v2.<br/>Watch thumbs, refusal rate,<br/>'no results' rate, p95"]
+    end
+    subgraph P5["⑤ Switch"]
+        A5["Flip reads to v2.<br/>KEEP v1 until confident"]
+    end
+
+    P1 --> P2 --> P3 --> P4 --> P5
+    P5 -.->|"regression"| RB["Roll back: flip reads<br/>to v1 — seconds, because<br/>you did not delete it"]
+
+    style P3 fill:#e6f4ea,stroke:#34a853
+    style RB fill:#fce8e6,stroke:#ea4335
+....
+
+The step people skip is ⑤'s second line. Deleting the old collection the moment
+the new one goes live converts a thirty-second rollback into a multi-hour
+re-index, which in practice means the team ships forward through a regression
+instead of reverting.
+
+*Shadow comparison is cheap and unusually informative.* Running both retrievers
+on live traffic and diffing the ranked ids — without showing users the new one —
+surfaces the queries where the change is most disruptive, which is exactly the
+set worth hand-inspecting before a canary.
+
+=== What Requires What
+
+[cols="2,1,3", options="header"]
+|===
+|Change |Full re-index? |Rollout
+
+|Embedding model
+|Yes
+|Dual-write to a new collection; the metric is *retrieval*, so shadow-compare rankings
+
+|Chunking strategy
+|Yes (re-parse too)
+|Same, but re-parsing makes it the slowest migration — budget accordingly
+
+|Contextual Retrieval prompt
+|Yes
+|Same; easy to underestimate because "it's just a prompt"
+
+|Generation prompt
+|No
+|Version it, A/B on live traffic, gate on faithfulness and thumbs
+
+|Generation model
+|No
+|Canary; watch faithfulness and refusal rate, not just latency
+
+|Reranker
+|No
+|Swap behind a flag; the metric is MRR, and hit-rate@50 must not move
+
+|New metadata field
+|Backfill only
+|No re-embed if `embed_text` is unchanged
+
+|`k`, thresholds, fusion weights
+|No
+|Config change; still gate on the eval suite
+|===
+
+*Version prompts like code.* A prompt string edited in place is an undocumented
+production change with no diff, no review and no rollback. Give each a version id,
+put it in the trace, and you can attribute a quality shift to it later.
+
+== Alerting
+
+The hard part is that the primary failure mode — plausible wrong answers —
+produces no error signal. So alerts must be built on *proxies*, and the proxies
+must be chosen so that a move is genuinely actionable.
+
+[cols="1,2,2", options="header"]
+|===
+|Signal |Alert when |Usually means
+
+|Ingestion DLQ depth
+|Non-zero and rising
+|A parser is failing on a new document type — the most common real incident
+
+|Reconciliation delta
+|`missing` or `stale` above a threshold
+|A webhook or crawler is broken; the corpus is going stale invisibly
+
+|Reconciliation `orphaned`
+|Any, immediately
+|Deleted documents still answering queries — treat as a security issue
+
+|"No results" rate
+|Step change
+|An index or a filter broke; or a whole source stopped ingesting
+
+|Refusal rate
+|Step change *in either direction*
+|Up: retrieval degraded. Down: the model started answering ungrounded
+
+|Citation verification failure rate
+|Above baseline
+|The model is drifting toward unsupported claims — an early hallucination signal
+
+|Thumbs-down rate
+|Above baseline, segmented by query type
+|Aggregate thumbs are noisy; segmentation is what makes them usable
+
+|p95 per stage
+|Above budget
+|See xref:RAG_Cost_Latency.adoc[Cost and Latency]
+
+|Cost per user per day
+|Above budget
+|Agentic loops, or abuse
+|===
+
+*Refusal rate is the most underrated signal here*, and it is the only one where
+both directions are bad. A system that stops saying "I don't know" has not become
+smarter — it has started answering from model knowledge instead of your corpus.
+
+== Incident Runbook
+
+[cols="1,3", options="header"]
+|===
+|Symptom |First diagnostic step
+
+|"Answers got worse this week"
+|Diff the `versions` block between a good trace and a bad one. Prompt, model, index snapshot — in that order of likelihood
+
+|"It says we have no policy on X"
+|Search the corpus verbatim. If absent → ingestion; if present → run the triage tool
+
+|"It's quoting the old policy"
+|Reconciliation `stale` list. Then check the webhook for that source
+
+|"It cited a document I can't open"
+|Permission drift. Compare the chunk's `acl_groups` against the IdP now, then check whether the answer was cached
+
+|"Latency doubled"
+|Per-stage p95 from traces. Usually a cold reranker, a provider slowdown, or an agent loop taking more steps
+
+|"Nothing is being indexed"
+|DLQ depth and worker logs. Then the embedding provider's rate limits
+
+|"Costs tripled"
+|Cost per query segmented by path — almost always the agentic branch firing more often than expected
+
+|"One user gets errors, others don't"
+|Their ACL group set. An empty or malformed group list produces a filter that matches nothing
+|===
+
+== SLOs for a Probabilistic System
+
+Conventional availability SLOs work fine for the mechanical parts and are
+meaningless for quality. Split them:
+
+[cols="1,2,2", options="header"]
+|===
+|Type |Example SLO |Notes
+
+|*Availability*
+|99.9% of queries return a response
+|Ordinary. Degraded modes count as success — BM25-only is a response
+
+|*Latency*
+|p95 < 3 s, p95 TTFT < 500 ms
+|Measure both; TTFT is what users perceive
+
+|*Freshness*
+|99% of source changes searchable within 5 min
+|Measured by reconciliation, not by hope
+
+|*Groundedness*
+|≥ 98% of claims pass citation verification
+|Mechanical, cheap, and the closest thing to a quality SLO you can page on
+
+|*Quality*
+|Eval-suite hit-rate@10 ≥ baseline − 2%
+|A release gate, not a pager. Quality regressions are caught in CI, not at 3am
+|===
+
+The distinction in the last two rows is the useful one: *groundedness is
+measurable in real time and can page someone; aggregate quality cannot*. Trying
+to alert on faithfulness scores from an LLM judge produces a noisy pager and a
+team that ignores it.
+
+== A Maturity Path
+
+Roughly the order in which teams actually need these, rather than an idealised
+list:
+
+. *Trace every answer* with retrieval ids and version stamps. Nothing else works
+  without it.
+. *The triage tool* — one command from `trace_id` to a diagnosis.
+. *Nightly reconciliation* with alerts on missing, stale and orphaned.
+. *DLQ visibility* — an admin view of documents known but not indexed.
+. *Eval suite in CI* as a merge gate (xref:RAG_Evaluation.adoc[Evaluation]).
+. *Prompt and model versioning* with the version in the trace.
+. *Dual-write migrations* so an index change is a switch, not an outage.
+. *Shadow and canary* for retrieval changes.
+. *Feedback loop* — every production failure becomes an eval row.
+
+Steps 1 and 2 cost about a day and pay for themselves on the first support
+ticket. Most of the rest is cheap once the trace exists.
+
+== Resources
+
+* link:https://github.com/Arize-ai/phoenix[Arize Phoenix] — RAG tracing and
+  span-level inspection; the closest thing to a purpose-built triage tool
+* link:https://smith.langchain.com[LangSmith] — traces, datasets, annotation
+  queues, regression comparison
+* link:https://opentelemetry.io/docs/specs/semconv/gen-ai/[OpenTelemetry GenAI
+  semantic conventions] — standard span attributes, worth adopting early
+* link:https://github.com/traceloop/openllmetry[OpenLLMetry] — OTel
+  instrumentation for LLM applications
+* link:https://github.com/langfuse/langfuse[Langfuse] — self-hostable LLM
+  observability
+* link:https://github.com/evidentlyai/evidently[Evidently] — drift detection,
+  originally for ML, applicable to embedding and query distributions

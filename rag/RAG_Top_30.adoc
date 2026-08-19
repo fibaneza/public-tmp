@@ -1,0 +1,323 @@
+= RAG Top 30 Interview Answers
+:doctype: article
+:toc: left
+:toclevels: 2
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+This is a short revision sheet for RAG interviews. Each answer is intentionally
+concise and framed the way a senior engineer would usually answer, with the
+follow-up the interviewer normally asks next.
+
+Depth on any of these is in the xref:README.adoc[Advanced RAG documents].
+
+== Fundamentals
+
+=== 1. What problem does RAG solve?
+
+It separates *knowledge* from *weights*. Instead of hoping the model memorised a
+fact, you retrieve the passage containing it and put it in the prompt. That buys
+freshness (update a document, the next query sees it), attribution (the answer
+points at a source), access control (retrieval is a query you can filter) and
+cost (indexing is cents, retraining is not).
+
+_Follow-up:_ "What does RAG *not* fix?" — reasoning quality, arithmetic, and a
+corpus that does not contain the answer. RAG changes what the model knows, not
+how well it thinks.
+
+=== 2. RAG or fine-tuning?
+
+They answer different questions. RAG changes *what the model knows*; fine-tuning
+changes *how it behaves* — format, tone, domain jargon, structured output. Most
+production systems use RAG for knowledge and a system prompt or light fine-tune
+for behaviour. Reaching for fine-tuning to teach facts is the classic mistake:
+it is expensive, has to be redone whenever the facts change, and still gives you
+no attribution.
+
+=== 3. Context windows keep growing — why not skip retrieval and paste everything?
+
+Three reasons. Cost: you pay for the whole corpus on every single query. Latency:
+input scales linearly. Accuracy: models attend most strongly to the start and end
+of a long context, so a fact buried in the middle of 500k tokens is often
+effectively invisible — the "lost in the middle" effect. A long window is best
+used to fit *more retrieved chunks*, not to skip retrieval.
+
+=== 4. Walk me through the naive pipeline and where it breaks.
+
+Offline: parse, chunk, embed, store. Online: embed the query, take the top-k
+nearest chunks, stuff them into a prompt, generate.
+
+It breaks at every stage. The parser garbles PDFs; the chunker cuts facts in
+half; the embedding blurs rare tokens like IDs and acronyms; top-k ordering is
+coarse; the prompt fills with noise; and the answer is unfalsifiable without
+citations. Every "advanced RAG" technique is a repair to one of those specific
+arrows.
+
+=== 5. If you could add only one thing to a naive pipeline, what would it be?
+
+A cross-encoder reranker — biggest accuracy gain per line of code, typically
++10-25 nDCG@5. But I would ask a question first: is the problem *recall* or
+*precision*? A reranker can only reorder what retrieval gave it. If hit-rate@50
+is 0.6, reranking cannot get you past 0.6, and the real fix is hybrid search or
+better chunking.
+
+== Chunking and Ingestion
+
+=== 6. How do you choose a chunk size?
+
+I do not choose it from a tutorial default — I sweep it. Chunk size over
+`{200, 400, 800}` tokens and overlap over `{0, 10%, 20%}` is nine cheap runs
+measured on hit-rate@10, and it answers the question for *that* corpus.
+
+Structurally, a good chunk is self-contained (pushes size up), single-topic
+(pushes size down) and citable (pushes size down). Those pull against each other,
+which is why Parent-Child retrieval — index small, return large — is usually a
+better answer than tuning one number.
+
+=== 7. Why is chunking a PDF harder than chunking a text file?
+
+A PDF has no paragraphs. It is a bag of positioned glyphs, and naive extraction
+walks them in *storage* order — so two-column papers interleave line by line,
+table cells become a flat run of numbers with no headers, and page footers splice
+into the middle of sentences. Chunk that and every downstream stage inherits the
+damage. A layout parser like Docling produces a document *tree*, so chunks can
+follow real section and table boundaries.
+
+=== 8. What is Parent-Child retrieval and what problem does it solve?
+
+It refuses the chunk-size trade-off: index the small chunks, return the large
+ones. Small chunks embed precisely — one idea per vector — but are too thin to
+answer from. Large chunks carry context but their embedding is the average of
+five topics, so it is close to everything and decisive about nothing. Search
+children, deduplicate to parent ids, feed the parent text to the model.
+
+=== 9. What is Contextual Retrieval?
+
+An index-time fix for chunks torn out of their document. A chunk reading "revenue
+grew by 3% over the previous quarter" is unretrievable by "ACME Q2 2023 revenue"
+and unattributable if retrieved. Before embedding, you ask an LLM to write a
+one-or-two sentence situating preamble using the whole document, and prepend it.
+Anthropic reported roughly a third fewer retrieval failures from that alone, and
+two thirds when combined with contextual BM25 and reranking.
+
+_Follow-up:_ "An LLM call per chunk — isn't that prohibitive?" Not with prompt
+caching: the document goes in a cached prefix once and each chunk pays only for
+itself, landing around a dollar per million corpus tokens, one time.
+
+=== 10. What is late chunking and how does it differ?
+
+Same goal, different mechanism. Late chunking embeds the *whole document* at
+token level first — so every token attends to the full document — then pools the
+token embeddings per chunk. Contextual Retrieval fixes the context *in the text*
+(works with any embedding model, and also improves BM25); late chunking fixes it
+*inside the encoder* (free at query time, no LLM calls, but needs a long-context
+token-level embedding model). They compose.
+
+== Embeddings and Search
+
+=== 11. What is the difference between a bi-encoder and a cross-encoder?
+
+A bi-encoder embeds query and document *independently*, one vector each. That
+independence is what makes precomputing the corpus — and therefore ANN search
+over millions of vectors — possible, and it is exactly why the ranking is coarse.
+A cross-encoder concatenates query and document and runs full cross-attention,
+so it can tell "the refund is *not* processed automatically" from "the refund
+*is*" — but it must run once per pair, so it can only rank a shortlist.
+
+=== 12. What is the most common silent bug in an embedding pipeline?
+
+Missing the query/passage prefix. Models trained for asymmetric retrieval — E5,
+BGE, Nomic — expect an instruction prefix, and omitting it produces no error at
+all; recall just drops several points. Second most common: using the wrong
+distance metric because the vector store defaulted to L2 while the model was
+trained for cosine.
+
+=== 13. Why does dense search fail on "ERR_4021"?
+
+Embeddings encode meaning by compressing it, and compression destroys exactly the
+tokens that carry little meaning but enormous discriminative power — error codes,
+order IDs, acronyms, version numbers. The nearest neighbours of `ERR_4021` are
+other error codes. BM25 handles it trivially because IDF makes a rare term
+valuable, which is the whole argument for hybrid search.
+
+=== 14. Explain BM25 in one answer.
+
+TF-IDF with two corrections. IDF makes rare terms count more. Term-frequency
+*saturation* means the tenth occurrence of a word adds far less than the second,
+so a keyword-stuffed document cannot win. Length normalisation discounts long
+documents that contain more of everything by default.
+
+=== 15. How do you combine dense and sparse results?
+
+Reciprocal Rank Fusion: `score(d) = Σ 1/(60 + rank(d))` across retrievers. It
+uses only *rank*, never raw score — which matters because BM25 scores are
+unbounded and corpus-dependent while cosine sits in [-1, 1], so you cannot add
+them. RRF needs no normalisation and no tuning. Weighted score fusion is more
+expressive but the weight must be tuned per corpus.
+
+=== 16. What is Matryoshka truncation?
+
+Models trained with Matryoshka Representation Learning front-load information
+into the early dimensions, so a truncated *prefix* of the vector is still a valid
+embedding — 3072 dims to 512 is a 6x memory cut for a small quality loss. The
+practical recipe is to truncate aggressively for the first-stage index and let a
+reranker restore the precision. Truncating a non-Matryoshka embedding gives you
+noise.
+
+=== 17. How would you cut vector storage by 90%?
+
+Quantisation. float32 to int8 is 4x smaller for about 1% recall — effectively
+free, and one config flag in most vector DBs. Binary is 32x smaller; you use it
+as a first-stage funnel with Hamming distance, retrieve ~200 candidates, then
+rescore those with full-precision vectors. Recall typically stays within a couple
+of points.
+
+== Ranking and Context
+
+=== 18. How do you size the candidate pool for reranking?
+
+Roughly 4-10x the number you will pass to the model. Too few and the reranker
+cannot fix a recall miss — it only reorders what it is given. Too many and
+latency grows linearly for diminishing precision. The failure people miss: if
+your chunks are longer than the cross-encoder's 512-token window, it silently
+scores only the first part. Rerank children, expand to parents afterwards.
+
+=== 19. What is contextual compression?
+
+Query-aware trimming of the retrieved set before it reaches the model. A relevant
+chunk is rarely relevant in every sentence — typically two sentences answer the
+question and eight came along because they shared a boundary. You filter chunks
+below a threshold, extract the sentences that bear on the query, and reorder so
+the strongest sit at the *edges* of the context rather than the middle. Often it
+is cost-*negative*: the saved input tokens exceed the cost of computing it.
+
+=== 20. Your retrieved chunks are five near-identical passages. Fix it.
+
+Maximal Marginal Relevance, applied after reranking: it trades a little relevance
+for coverage by penalising a candidate's similarity to what is already selected.
+λ around 0.7 is a reasonable default. Worth noting it is the wrong tool for a
+narrow factual question, where you genuinely do want the five most relevant
+chunks — it earns its place on broad or comparison questions.
+
+== Query Understanding
+
+=== 21. What is HyDE and why does a wrong answer help?
+
+A question and its answer are different genres of text — one interrogative and
+vague, the other declarative and noun-dense — so the question vector often sits
+closer to other *questions* than to the answer. HyDE generates a hypothetical
+answer and embeds *that* instead. It can be factually wrong and still work: it
+only has to be wrong in the right style and vocabulary, so the vector lands where
+real answers live. The retrieved chunks are real, so the output stays grounded.
+
+_Follow-up:_ "When would you skip it?" Short keyword queries — inventing a
+document around `PIT` adds noise — and any latency budget that cannot absorb an
+extra LLM call.
+
+=== 22. RAG-Fusion vs Multi-Query — what is the difference?
+
+Both generate N paraphrases and retrieve for each. Multi-Query merges by
+deduplicated union, so a chunk found by one variant ranks the same as one found
+by all four. RAG-Fusion merges with RRF, so *consensus across phrasings* wins.
+That is the whole difference and it is the reason to prefer RAG-Fusion — though
+it has the worst latency-to-benefit ratio of the commonly recommended techniques,
+so measure it before shipping.
+
+=== 23. Distinguish hybrid search, RAG-Fusion and reranking.
+
+Hybrid search fuses different *retrievers* over one query. RAG-Fusion fuses
+different *queries* over one retriever. Reranking does not fuse anything — it
+reorders one candidate list using a more expensive model. The first two compose
+with each other and both feed the third.
+
+=== 24. What is RRR?
+
+Rewrite-Retrieve-Read: insert a rewriter before retrieval, because naive RAG
+assumes the raw user query is a good search key and it usually is not — typos,
+chat context, filler, and multiple questions at once. The paper's real
+contribution is that the rewriter is trainable by RL against downstream answer
+correctness. In production most teams start with a frozen LLM and train later.
+The important behaviour is *decomposition*: retrieving once for a compound query
+returns the average of two topics, which is usually neither.
+
+== Conversation and Attribution
+
+=== 25. A user asks "what does it do?" as a follow-up and gets nothing. Why?
+
+That string embedded on its own is equidistant from every document you own —
+"it" has no referent in the vector. The fix is query contextualisation: rewrite
+the follow-up into a standalone question using the history, retrieve with the
+rewrite, but answer as the *original* turn. Two details matter: the rewriter must
+be able to pass an already-standalone question through unchanged, and history
+must be bounded — sliding window plus a rolling summary of what fell out.
+
+=== 26. How do you make citations trustworthy rather than decorative?
+
+Three layers. Prompted markers are the floor and the model can cite the wrong
+chunk. Structured output — the model emits claims with source ids and a
+*verbatim quote* — turns the citation into data you can validate. Post-hoc
+verification then checks the quote actually appears in the cited chunk, which
+catches both a fabricated source id and a "quote" the model smoothed out while
+copying, which usually means it was reconstructing from memory.
+
+_Follow-up:_ "What does verification *not* catch?" That the quote supports the
+claim. For that you need an NLI model or an LLM entailment check.
+
+=== 27. How do you delete one document from a vector index?
+
+Every chunk must carry `doc_id` — then it is a filtered delete rather than a
+scan. The part people get wrong is *update*: you delete by `doc_id` and re-add,
+never overwrite chunks `0..n`, because chunk counts change between versions and
+you leave orphans from `n+1` onward that keep answering queries with deleted
+content. Ingestion should also be idempotent on a content hash, so re-ingesting
+an unchanged file costs nothing.
+
+== Evaluation and Production
+
+=== 28. What is RAGAS and why are its metrics split in two?
+
+The standard open-source RAG evaluation framework, notable for *reference-free*
+metrics — most need only the question, the contexts and the answer, achieved by
+having an LLM decompose outputs into atomic claims.
+
+The split matters more than the tool: `context_precision` and `context_recall`
+measure retrieval, `faithfulness` and `answer_relevancy` measure generation. One
+aggregate score tells you the system is bad; the split tells you *which stage to
+change*. Low recall is a retrieval problem and generation is innocent. Good
+context with low faithfulness is a generation problem and retrieval is innocent.
+
+=== 29. How do you gate RAG changes in CI when the metrics need an LLM judge?
+
+Two tiers. Deterministic retrieval metrics — hit-rate@k, MRR, nDCG on a labelled
+set — are free, stable and fast, so they run on every commit and block a merge on
+regression. LLM-judged metrics cost money and have run-to-run variance, so they
+run nightly against a pinned judge model and pinned framework version. And every
+production failure gets added to the eval set, which is what makes the suite
+compound rather than go stale.
+
+_Follow-up:_ "What invariant would you assert?" Adding a reranker should improve
+MRR while leaving hit-rate@50 *unchanged*. If hit-rate moves, the reranker is
+being fed a different candidate pool than you think.
+
+=== 30. Where does the latency actually go, and what would you optimise first?
+
+Generation, at roughly 65% of wall-clock. Retrieval — where people spend their
+tuning time — is usually 2-5%, so halving it is invisible to users. I would
+stream the response first: total time is unchanged but perceived latency roughly
+halves. Then cap output tokens, then make expensive stages conditional — real
+traffic is dominated by simple queries, so routing those down a fast path and
+reserving rewriting, fusion and agentic loops for the minority that needs them
+typically cuts mean cost and latency by more than half.
+
+== Questions Worth Asking Back
+
+Interviews go better when you show you know which decisions are corpus-dependent:
+
+* What does the corpus actually look like — clean prose, scanned PDFs, code,
+  tables? It changes the parser, the chunker and possibly the whole architecture.
+* What is the latency budget? 500 ms rules out any LLM call in the query path.
+* Is there an eval set? If not, that is the first deliverable, not the fifth.
+* Who is allowed to see what? Access control has to be a pre-filter derived from
+  the authenticated principal, and retrofitting it means a re-index.
+* How often does the corpus change, and does anything need to stay citable after
+  it does?

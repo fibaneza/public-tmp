@@ -1,0 +1,47 @@
+# Core RAG stack used by the examples in this folder.
+# Install with:  pip install -r requirements.txt
+#
+# Pin ranges are indicative -- bump them to the latest compatible release.
+
+# --- Embeddings & rerankers -------------------------------------------------
+sentence-transformers>=3.0        # bi-encoders (embeddings) + CrossEncoder (reranking)
+FlagEmbedding>=1.2                # BGE / BGE-M3 embeddings and bge-reranker models
+torch>=2.2                        # backend for the two above
+
+# --- Lexical / sparse retrieval ---------------------------------------------
+rank-bm25>=0.2.2                  # pure-python BM25Okapi, fine for <100k chunks
+bm25s>=0.2                        # faster sparse BM25 alternative
+
+# --- Vector stores ----------------------------------------------------------
+chromadb>=0.5                     # local, zero-config vector DB used in most examples
+faiss-cpu>=1.8                    # in-process ANN index
+qdrant-client>=1.9                # optional: server-grade vector DB with native hybrid
+pgvector>=0.3                     # optional: Postgres vector extension client
+psycopg[binary]>=3.1              # optional: Postgres driver
+
+# --- Orchestration ----------------------------------------------------------
+langchain>=0.3
+langchain-community>=0.3
+langchain-anthropic>=0.3
+langchain-text-splitters>=0.3
+llama-index>=0.11                 # optional: alternative orchestration framework
+
+# --- Document parsing / structure-aware chunking ----------------------------
+docling>=2.0                      # real PDF layout parsing (tables, headings, reading order)
+docling-core>=2.0                 # HybridChunker and the DoclingDocument model
+pypdf>=4.2                        # naive PDF text extraction, used as the "before" baseline
+unstructured>=0.15                # optional: alternative layout parser
+
+# --- LLM clients ------------------------------------------------------------
+anthropic>=0.40                   # Claude models used for generation / rewriting / judging
+
+# --- Evaluation -------------------------------------------------------------
+ragas>=0.2                        # RAG-specific metrics (faithfulness, context precision, ...)
+datasets>=2.20                    # ragas input format
+deepeval>=1.0                     # optional: alternative eval harness
+trulens-eval>=1.0                 # optional: RAG triad instrumentation
+
+# --- Utilities --------------------------------------------------------------
+numpy>=1.26
+pydantic>=2.7
+tiktoken>=0.7                     # token-accurate chunk sizing

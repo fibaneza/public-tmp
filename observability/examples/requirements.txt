@@ -1,0 +1,22 @@
+# FastAPI + LiteLLM + CloudWatch observability stack.
+#   pip install -r requirements.txt
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+
+litellm>=1.55                 # router/proxy; provides response_cost + callbacks
+anthropic>=0.40               # only if you also call a provider SDK directly
+
+boto3>=1.35                   # CloudWatch alarms, RDS IAM auth tokens
+aws-embedded-metrics>=3.2     # optional: EMF helper (this repo emits EMF by hand)
+
+# --- Aurora Serverless v2 (PostgreSQL) --------------------------------------
+asyncpg>=0.29                 # async driver; supports a CALLABLE password (IAM auth)
+# SQLAlchemy[asyncio]>=2.0    # optional, if you want an ORM over the same pool
+# pglast>=6.0                 # optional, dev only: parse-check SQL in CI
+
+# Distributed tracing (optional — see the tracing section of the document)
+opentelemetry-sdk>=1.27
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-exporter-otlp-proto-grpc>=1.27

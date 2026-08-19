@@ -1,0 +1,237 @@
+= Source Citations and Attribution
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+An uncited RAG answer is unfalsifiable. The user cannot tell a grounded claim
+from a hallucination without re-reading the corpus — which is the work RAG was
+supposed to do for them.
+
+📄 xref:examples/citations.py[`examples/citations.py`]
+
+== Three Mechanisms
+
+In increasing order of trustworthiness, and they stack.
+
+[mermaid]
+....
+flowchart TB
+    subgraph M1["① Prompted markers"]
+        A1["Number the sources.<br/>'Cite [1] after each claim.'"]
+        A1 --> A2["Cheap · works well<br/>❌ model can cite the wrong<br/>number, or a chunk it<br/>never used"]
+    end
+
+    subgraph M2["② Structured output"]
+        B1["Model emits JSON:<br/>claims[] with source_ids<br/>and a verbatim quote"]
+        B1 --> B2["✅ citation is DATA<br/>you can validate, not<br/>prose you must parse"]
+    end
+
+    subgraph M3["③ Post-hoc verification"]
+        C1["Does the quote actually<br/>appear in that chunk?<br/>Does the chunk entail<br/>the claim?"]
+        C1 --> C2["✅ the only mechanism that<br/>catches a confidently<br/>WRONG citation"]
+    end
+
+    M1 --> M2 --> M3
+
+    style M1 fill:#fef7e0,stroke:#fbbc04
+    style M2 fill:#e8f0fe,stroke:#4285f4
+    style M3 fill:#e6f4ea,stroke:#34a853
+....
+
+Ship ② and ③ together: ② gives you something to check, ③ does the checking.
+
+== Prompted Markers
+
+The floor. Number the context blocks and ask for markers.
+
+[source,text]
+----
+Answer using only the sources below. Cite the source id after every factual
+sentence, like [c3]. If the sources do not answer the question, say so.
+
+<source id="c1" doc="Payments Runbook" page="3">
+To roll back a payments deployment, run `payctl rollback --to <release>`...
+</source>
+
+<source id="c3" doc="Refund Policy" page="1">
+Customers may request a refund within 14 days of purchase...
+</source>
+----
+
+Two details that measurably improve compliance:
+
+* *Expose stable ids, not positions.* `[c3]` resolves to a document, page and a
+  deep link. `[2]` means "the second thing I happened to pass this time".
+* *Give an explicit escape hatch.* "Say so if the sources do not answer" is what
+  stops the model inventing a citation to satisfy the format.
+
+== Structured Cited Claims
+
+Make the citation machine-readable, so it can be validated rather than trusted.
+
+[source,json]
+----
+{
+  "claims": [
+    {
+      "text": "Customers have 14 days from purchase to request a refund.",
+      "source_ids": ["c3"],
+      "quote": "Customers may request a refund within 14 days of purchase."
+    },
+    {
+      "text": "Card refunds settle in three to five business days.",
+      "source_ids": ["c4"],
+      "quote": "Card refunds settle in three to five business days"
+    }
+  ],
+  "shortfall": null
+}
+----
+
+The `quote` field is the load-bearing part. Requiring a verbatim span does two
+things at once: it gives you something to verify mechanically, and it *changes
+the model's behaviour* — a model that must copy an exact span is measurably less
+likely to assert something the span does not support.
+
+== Quote Verification
+
+The cheap, deterministic check that catches most attribution failures.
+
+[source,python]
+----
+def normalise(text):
+    # Collapse whitespace and case so line-wrapping differences still match.
+    # Do NOT strip punctuation: "not refundable" vs "refundable" is exactly
+    # the difference you are trying to catch.
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+def verify(claim, chunks_by_id):
+    unknown = [sid for sid in claim.source_ids if sid not in chunks_by_id]
+    if unknown:
+        return False, f"cites unknown source(s): {unknown}"
+    if not any(normalise(claim.quote) in normalise(chunks_by_id[sid].text)
+               for sid in claim.source_ids):
+        return False, "quote not found verbatim in the cited source"
+    return True, ""
+----
+
+This catches the two failures prompting alone cannot:
+
+. *A fabricated source id* — the model cites `c9` when only `c1`-`c6` were passed.
+. *A smoothed quote* — the model paraphrased while "copying", which almost always
+  means it was reconstructing from memory rather than reading.
+
+*Verify against the verbatim `text` field, not `embed_text`.* If your chunks carry
+a heading breadcrumb or an LLM-written
+xref:RAG_Techniques.adoc#_contextual_retrieval[contextual preamble], a correctly
+copied quote will fail verification against the augmented string. Keep the two
+fields separate — see
+xref:RAG_Chunking.adoc#_chunk_metadata[chunk metadata].
+
+=== Entailment Checking
+
+Verification proves the quote exists. It does not prove the quote *supports the
+claim*. For that you need entailment:
+
+[cols="1,2,2", options="header"]
+|===
+|Method |Cost |Notes
+
+|NLI model (`cross-encoder/nli-deberta-v3-base`)
+|~20 ms per pair, local
+|Outputs entail / neutral / contradict. Fast enough for every claim.
+
+|LLM judge
+|1 call per claim (or one batched call)
+|More accurate on domain text; use for spot checks or high-stakes answers.
+
+|Faithfulness metric (RAGAS)
+|Offline
+|The same idea run as an evaluation rather than a runtime gate — see xref:RAG_Evaluation.adoc[Evaluation]
+|===
+
+A practical split: run cheap quote verification on *every* production answer as a
+gate, and LLM-judged entailment offline on a sample as a quality metric.
+
+== Rendering
+
+[mermaid]
+....
+flowchart TB
+    A[Claims] --> V{Verified?}
+    V -->|yes| R["Render inline<br/>with footnote marker"]
+    V -->|no| D{Policy}
+    D -->|strict| DROP["Drop the claim"]
+    D -->|lenient| FLAG["Render, flagged as<br/>'could not verify'"]
+    R --> F["Footnote list:<br/>[1] Refund Policy p.1 §Eligibility<br/>with the quoted span"]
+    F --> UI["UI: click → open the<br/>source at that page,<br/>highlight the span"]
+
+    style DROP fill:#fce8e6,stroke:#ea4335
+    style R fill:#e6f4ea,stroke:#34a853
+....
+
+An unverified claim is not automatically a lie, but it is not evidence either.
+Never render it inline as though it were grounded — drop it, or mark it visibly.
+
+*What a good citation UI does:*
+
+* Footnote markers inline, not a bare "Sources:" list at the bottom — the reader
+  needs to know *which* sentence came from *where*.
+* Click-through to the source *at the right page*, with the quoted span
+  highlighted.
+* Show the quote on hover, so checking one claim does not require leaving the page.
+* Show what was retrieved but *not* used, in a debug view. This is how you
+  diagnose "why did it miss that?" without re-running anything.
+
+== Failure Modes
+
+[cols="1,2,2", options="header"]
+|===
+|Failure |Cause |Mitigation
+
+|Citation points at a chunk that does not support the claim
+|Model attached a plausible id post-hoc
+|Require a verbatim quote; verify it
+
+|Answer is right, citation is wrong
+|Model synthesised across chunks then cited one
+|Allow multiple `source_ids` per claim; check entailment
+
+|Every sentence cites every source
+|Prompt asked for citations without asking for *specific* ones
+|Ask for the minimum set of sources per claim
+
+|No citations at all on some answers
+|Model treated them as optional formatting
+|Structured output with a required field; reject and retry on a schema miss
+
+|Citations to the contextual preamble
+|Verification ran against `embed_text`
+|Verify against verbatim `text`
+
+|Correct quote, wrong page
+|Page metadata lost during parsing
+|Carry `prov`/page from the parser — see xref:RAG_Chunking.adoc#_structure_aware_parsing[structure-aware parsing]
+
+|Confident answer citing nothing because retrieval failed
+|No escape hatch in the prompt
+|Explicit "say the documents do not contain this" instruction, plus a `shortfall` field
+|===
+
+== Attribution and Compliance
+
+In regulated contexts (finance, health, legal) citations are often the *product*,
+not a nicety. Things worth building in from the start:
+
+* *Immutable source versions.* A citation to "Refund Policy p.1" is worthless if
+  the policy changed. Cite `doc_id + version`, and keep old versions retrievable.
+* *An audit log per answer.* Question, retrieved chunk ids, model, prompt version,
+  verification result. This doubles as your
+  xref:RAG_Evaluation.adoc[evaluation dataset].
+* *Refusal over inference.* When the corpus does not contain the answer, saying so
+  is the correct output — measure the refusal rate on your negative eval cases
+  rather than treating every refusal as a failure.

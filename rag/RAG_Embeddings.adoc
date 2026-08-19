@@ -1,0 +1,366 @@
+= Embeddings and Vector Storage
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+An embedding maps text to a vector such that semantically similar text lands
+nearby. For RAG, the interesting part is not the definition but the decisions
+around it — most of which have a wrong default that fails silently.
+
+See xref:../AI_guide.adoc[AI guide] for the general embeddings and quantization
+background; this document is retrieval-specific.
+
+== How Retrieval Embeddings Work
+
+[mermaid]
+....
+flowchart LR
+    subgraph OFF["Offline — once per chunk"]
+        D[Chunk text] --> BE1[Bi-encoder] --> DV["[0.02, -0.31, ...]<br/>768 floats"]
+        DV --> IDX[(ANN index<br/>HNSW / IVF)]
+    end
+
+    subgraph ON["Online — every query"]
+        Q[Query text] --> BE2[Same bi-encoder] --> QV["[0.05, -0.28, ...]"]
+        QV --> S["cosine(q, d)<br/>= q · d for unit vectors"]
+        IDX -.-> S
+        S --> K[top-k]
+    end
+
+    style OFF fill:#e8f0fe,stroke:#4285f4
+    style ON fill:#e6f4ea,stroke:#34a853
+....
+
+The defining property is that query and document are encoded *independently*.
+That is what makes precomputing the corpus — and therefore ANN search over
+millions of vectors — possible, and it is exactly why the ranking is coarse
+enough to need xref:RAG_Reranking.adoc[a reranker].
+
+image::../img/ann_algorithm.png[Approximate Nearest Neighbor, width=800]
+
+== The Five Decisions
+
+📄 All demonstrated in xref:examples/embeddings_lab.py[`examples/embeddings_lab.py`].
+
+=== Symmetric vs Asymmetric — and Prefixes
+
+Retrieval is *asymmetric*: a short question must match a long passage. Models
+trained for it (E5, BGE, GTE, Nomic) expect an instruction prefix, and *omitting
+it is the single most common silent bug in RAG*. There is no error — recall just
+drops several points.
+
+[cols="1,2,2", options="header"]
+|===
+|Model family |Query prefix |Document prefix
+
+|E5 (`intfloat/e5-*`)
+|`query: `
+|`passage: `
+
+|BGE v1.5 (`BAAI/bge-*-en-v1.5`)
+|`Represent this sentence for searching relevant passages: `
+|(none)
+
+|BGE-M3
+|(none)
+|(none)
+
+|Nomic (`nomic-embed-text-v1.5`)
+|`search_query: `
+|`search_document: `
+
+|GTE, `all-MiniLM`, OpenAI, Voyage, Cohere v3
+|(none — or an `input_type` API parameter)
+|(none)
+|===
+
+Always read the model card. Cohere and Voyage express the same idea as an API
+parameter (`input_type="search_query"` vs `"search_document"`) rather than a
+literal string.
+
+=== Normalisation and the Distance Metric
+
+Normalise to unit length and the dot product *is* cosine similarity — so the
+fastest index operation is also the correct metric.
+
+[cols="1,3", options="header"]
+|===
+|Metric |When
+
+|*Cosine*
+|Default for text embeddings. Direction only; magnitude ignored.
+
+|*Inner product*
+|Identical to cosine on normalised vectors. On un-normalised ones it rewards long documents for having a bigger norm — usually a bug, occasionally intended.
+
+|*L2 / Euclidean*
+|Almost never for text. On unit vectors `l2² = 2 − 2·cos`, so it ranks identically; on un-normalised ones it disagrees with what the model was trained on.
+|===
+
+Configure the metric explicitly in your vector store. Chroma defaults to L2;
+several others default to inner product. A mismatch degrades quietly.
+
+[source,python]
+----
+collection = client.create_collection("docs", metadata={"hnsw:space": "cosine"})
+----
+
+=== Dimensions and Matryoshka
+
+More dimensions is not straightforwardly better — it is a memory and latency
+cost that buys diminishing accuracy.
+
+Matryoshka Representation Learning trains a model so that a *truncated prefix* of
+the vector is still a valid embedding. `text-embedding-3-large`,
+`nomic-embed-text-v1.5` and several BGE models support it.
+
+[mermaid]
+....
+flowchart LR
+    F["3072 dims<br/>12 KB/vector"] --> T1["1024 dims<br/>4 KB — ~99% of quality"]
+    T1 --> T2["512 dims<br/>2 KB — ~97%"]
+    T2 --> T3["256 dims<br/>1 KB — ~93%"]
+    T3 --> R["+ cross-encoder rerank<br/>recovers most of the gap"]
+
+    style R fill:#e6f4ea,stroke:#34a853
+....
+
+The practical recipe: truncate aggressively for the *first-stage* index, then let
+a reranker restore precision. You get the memory savings and keep the accuracy.
+Truncating a *non*-Matryoshka embedding produces noise — check the model card.
+
+=== Quantisation
+
+[cols="1,1,1,2", options="header"]
+|===
+|Precision |Size (768-d) |Recall retained |Use
+
+|float32
+|3 KB
+|100% (baseline)
+|Small corpora; rescoring stage
+
+|float16
+|1.5 KB
+|~100%
+|Free win, effectively always
+
+|int8 (scalar)
+|768 B
+|~99%
+|Best default trade-off; one config flag in most vector DBs
+
+|binary (1 bit)
+|96 B
+|~92-96% with rescoring
+|First-stage funnel at very large scale
+|===
+
+The standard large-scale pattern is a two-stage funnel: search binary vectors
+with Hamming distance (a XOR + popcount, effectively free) to get ~200
+candidates, then rescore those with int8 or float32 vectors. 32x less memory,
+recall within a couple of points.
+
+image::../img/quantization_impact.png[Quantization impact, width=800]
+
+=== Domain Fit
+
+General-purpose models are trained on web text. If your corpus is legal, medical,
+financial or code, evaluate a domain model or fine-tune. The cheap version of
+fine-tuning for retrieval is training on `(query, positive_passage,
+hard_negative)` triplets mined from your own click or eval data — a few thousand
+triplets can move recall several points.
+
+Never assume; measure on your corpus with
+xref:RAG_Evaluation.adoc#_retrieval_metrics[hit-rate@k].
+
+== Choosing a Model
+
+[cols="2,1,1,1,3", options="header"]
+|===
+|Model |Dims |Context |Host |Notes
+
+|`BAAI/bge-small-en-v1.5`
+|384
+|512
+|local
+|Excellent size/quality ratio; a fine default for prototypes and edge
+
+|`BAAI/bge-large-en-v1.5`
+|1024
+|512
+|local
+|Strong English quality; short window is the constraint
+
+|`BAAI/bge-m3`
+|1024
+|8192
+|local
+|Multilingual; produces dense + sparse + ColBERT vectors in one pass
+
+|`intfloat/multilingual-e5-large`
+|1024
+|512
+|local
+|Solid multilingual baseline
+
+|`nomic-embed-text-v1.5`
+|768 (Matryoshka)
+|8192
+|local
+|Long context, truncatable, open weights
+
+|`jina-embeddings-v3`
+|1024 (Matryoshka)
+|8192
+|local/API
+|Task-specific LoRAs; designed for late chunking
+
+|`all-MiniLM-L6-v2`
+|384
+|256
+|local
+|Tiny and fast; noticeably weaker — prototypes only
+
+|`voyage-3` / `voyage-code-3`
+|1024
+|32000
+|API
+|Consistently near the top of retrieval benchmarks; code variant
+
+|`text-embedding-3-large`
+|3072 (Matryoshka)
+|8191
+|API
+|Strong general default; truncatable
+
+|`embed-v4` (Cohere)
+|1536
+|128k
+|API
+|Multimodal; native `input_type` handling
+|===
+
+Check link:https://huggingface.co/spaces/mteb/leaderboard[MTEB] for current
+standings — but read the *retrieval* sub-scores, not the overall average, and
+prefer a task/domain close to yours. MTEB is also partly contaminated by models
+trained on its test sets; treat it as a shortlist generator, not a verdict.
+
+== ANN Indexes
+
+Exact search is `O(n)` per query. Above ~100k vectors you need an approximate
+index, which trades a small amount of recall for orders of magnitude of speed.
+
+[cols="1,3,2", options="header"]
+|===
+|Index |How |Trade-off
+
+|*Flat*
+|Brute force over every vector
+|Exact, no build time; fine to ~100k
+
+|*HNSW*
+|Navigable small-world graph; greedy descent through layers
+|Best recall/latency; high memory; slow to build
+
+|*IVF*
+|Cluster into cells (k-means), search the nearest `nprobe` cells
+|Lower memory; recall depends on `nprobe`
+
+|*IVF-PQ*
+|IVF + product quantisation of residuals
+|Massive compression; noticeable recall loss
+
+|*ScaNN*
+|Anisotropic quantisation tuned for inner product
+|Very fast; Google-flavoured tooling
+
+|*DiskANN*
+|Graph index that lives on SSD
+|Billions of vectors on one machine
+|===
+
+image::../img/ann_hnsw_algorithm.png[HNSW algorithm, width=800]
+
+*HNSW knobs worth knowing:* `M` (edges per node — higher = better recall, more
+memory), `ef_construction` (build-time search width — higher = better graph,
+slower build), `ef_search` (query-time width — the *only* one you can tune after
+the fact, and the one to raise when recall is short).
+
+== Vector Stores
+
+[cols="1,2,2,1", options="header"]
+|===
+|Store |Strength |Watch out for |Hybrid built in
+
+|link:https://github.com/chroma-core/chroma[Chroma]
+|Zero-config local; great for prototypes and tests
+|Defaults to L2; single-node
+|partial
+
+|link:https://github.com/qdrant/qdrant[Qdrant]
+|Rich payload filtering, quantisation, sparse vectors
+|Operate a service
+|✅
+
+|link:https://github.com/weaviate/weaviate[Weaviate]
+|Native hybrid with tunable alpha; modules
+|Heavier footprint
+|✅
+
+|link:https://github.com/milvus-io/milvus[Milvus]
+|Billion-scale, many index types
+|Most complex to operate
+|✅
+
+|link:https://github.com/pgvector/pgvector[pgvector]
+|It is just Postgres — joins, transactions, ACLs, backups you already have
+|Index tuning is manual; scale ceiling lower
+|via `tsvector`
+
+|link:https://github.com/lancedb/lancedb[LanceDB]
+|Embedded, columnar, versioned; great for edge
+|Younger ecosystem
+|✅
+
+|link:https://github.com/facebookresearch/faiss[FAISS]
+|Fastest in-process library; every index type
+|A library, not a database — no metadata, no persistence layer
+|❌
+
+|Pinecone / Vertex / Azure AI Search
+|Managed, SLA, no ops
+|Cost; vendor lock-in
+|✅
+|===
+
+*The under-rated option is pgvector.* If your documents already live in Postgres,
+metadata filtering, ACLs, transactional updates and backups are solved problems,
+and `tsvector` gives you BM25-ish lexical search in the same query. That removes
+an entire class of consistency bugs between "the document store" and "the vector
+store".
+
+image::../img/rag_postgresql.png[RAG with PostgreSQL and pgvector, width=800]
+
+== Operational Notes
+
+*Re-embedding is a migration.* Changing the embedding model invalidates every
+vector — you cannot mix. Plan for dual-write (index into a new collection, switch
+reads atomically, drop the old) rather than in-place update.
+
+*Cache embeddings by content hash.* Re-ingesting an unchanged document should
+cost zero embedding calls. See
+xref:RAG_Document_Management.adoc#_idempotent_ingestion[idempotent ingestion].
+
+*Batch at ingest.* Encoding 1000 chunks in one `encode()` call is far faster than
+1000 calls, and API providers price and rate-limit per request.
+
+*Normalise once, at write time.* Not at query time in application code where one
+code path will forget.
+
+*Version the index.* Store the model name and version in the collection metadata,
+so a mismatched query-time model is an error rather than silently bad results.

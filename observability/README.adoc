@@ -1,0 +1,46 @@
+= Observability
+:doctype: article
+:toc: left
+:toclevels: 2
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Logging, tracing, cost attribution and alerting for LLM services.
+
+* xref:LLM_Observability_AWS.adoc[*LLM Observability on AWS*] — FastAPI +
+  LiteLLM + ECS Fargate, with metrics and alarms in CloudWatch (no Grafana).
+
+== Examples
+
+[cols="2,3", options="header"]
+|===
+|File |Contains
+
+|xref:examples/context.py[`context.py`]
+|Request-scoped correlation ids via `contextvars` — request, trace, session, user.
+
+|xref:examples/emf.py[`emf.py`]
+|CloudWatch Embedded Metric Format emitter, with the dimension-vs-property guard that keeps `user_id` out of your metric bill.
+
+|xref:examples/litellm_callback.py[`litellm_callback.py`]
+|LiteLLM `CustomLogger` capturing cost, tokens (input / output / cache-read / cache-write), model and timings.
+
+|xref:examples/sessions.py[`sessions.py`]
+|Aurora Serverless v2 (PostgreSQL) session store and per-call usage ledger, created by FastAPI, id shared with LiteLLM as call metadata. Covers RDS Proxy pooling, IAM auth and the missing-TTL problem.
+
+|xref:examples/app.py[`app.py`]
+|FastAPI app — correlation middleware, structured JSON logging, chat and streaming endpoints with TTFT.
+
+|xref:examples/alarms.py[`alarms.py`]
+|CloudWatch alarms (spend, anomaly, p95 latency, error *rate*, composite) and eight Logs Insights queries.
+
+|xref:examples/ecs_task_definition.json[`ecs_task_definition.json`]
+|ECS Fargate task definition with the log driver, secrets and IAM notes.
+|===
+
+== Related
+
+* xref:../rag/RAG_Operations.adoc[RAG Production Operations] — the general
+  discipline this implements
+* xref:../rag/RAG_Cost_Latency.adoc[Cost and Latency Budgeting]
+* xref:../rag/README.adoc[Advanced RAG]

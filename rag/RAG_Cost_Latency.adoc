@@ -1,0 +1,419 @@
+= Cost and Latency Budgeting
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Every technique in xref:RAG_Techniques.adoc[Techniques] buys accuracy with money
+or milliseconds. This document is the other side of that ledger: where the budget
+actually goes, what each stage costs, and how to spend it deliberately rather
+than by accumulation.
+
+The failure this prevents is specific and common — a pipeline that grew one
+"cheap" addition at a time until p95 is four seconds and nobody can say which
+stage to remove.
+
+== Where the Budget Goes
+
+[mermaid]
+....
+flowchart LR
+    Q([Query]) --> A["Query rewrite<br/>(LLM)"] --> B["Embed query"] --> C["ANN + BM25"] --> D["Rerank"] --> E["Compress"] --> F["Generate<br/>(LLM)"] --> R([Answer])
+
+    A -.- A1["300-800 ms<br/>~£0.0003"]
+    B -.- B1["10-30 ms<br/>~£0.000002"]
+    C -.- C1["5-20 ms<br/>~£0"]
+    D -.- D1["50-200 ms<br/>~£0 local<br/>£0.001 hosted"]
+    E -.- E1["0 ms embeddings<br/>500 ms+ if LLM"]
+    F -.- F1["800-3000 ms<br/>~£0.004"]
+
+    style F1 fill:#fce8e6,stroke:#ea4335
+    style A1 fill:#fef7e0,stroke:#fbbc04
+    style C1 fill:#e6f4ea,stroke:#34a853
+....
+
+*The shape almost every RAG system has:* generation dominates, and every LLM call
+you add in front of it is a meaningful fraction of a second. Retrieval — the part
+people spend their tuning time on — is usually 2-5% of wall-clock.
+
+[cols="2,1,1,3", options="header"]
+|===
+|Stage |Typical p50 |Share |Note
+
+|Query rewrite / expansion
+|400 ms
+|~12%
+|An LLM call. The most-added and least-measured stage
+
+|Query embedding
+|15 ms
+|<1%
+|Local model; an API embedder makes this 100-200 ms
+
+|Vector + BM25 search
+|10 ms
+|<1%
+|Grows with `log(corpus)`, not linearly
+
+|Cross-encoder rerank
+|80 ms
+|~3%
+|Local MiniLM over 50 candidates; a large multilingual model is 5-10x
+
+|Compression
+|0-600 ms
+|0-18%
+|Free with embeddings, expensive with an LLM extractor
+
+|*Generation*
+|*2000 ms*
+|*~65%*
+|Scales with *output* tokens far more than input
+
+|Citation verification
+|5 ms
+|<1%
+|String matching. Effectively free; always worth it
+|===
+
+*The corollary people miss:* halving retrieval latency is invisible to users.
+Cutting 400 tokens of output, or streaming the first token sooner, is not.
+
+== Cost per Million Queries
+
+Order-of-magnitude figures for a mid-sized model and a ~2k-token context. Use the
+*ratios*, not the absolute numbers — provider pricing moves.
+
+[cols="2,1,1,3", options="header"]
+|===
+|Configuration |Rel. cost |Rel. p95 |What you get
+
+|Naive RAG (baseline)
+|1.0x
+|1.0x
+|The floor
+
+|+ hybrid search
+|1.0x
+|1.05x
+|Large recall win, essentially free
+
+|+ local cross-encoder rerank
+|1.0x
+|1.15x
+|Largest precision win, no API cost
+
+|+ hosted rerank API
+|1.3x
+|1.2x
+|Same win, no GPU to operate
+
+|+ contextual compression (embeddings)
+|0.85x
+|1.15x
+|*Cheaper* — fewer input tokens than it costs to compute
+
+|+ contextual compression (LLM extractor)
+|2.5x
+|1.5x
+|Sharper, rarely worth it over the embeddings version
+
+|+ query rewrite (RRR)
+|1.4x
+|1.3x
+|Necessary for chat interfaces
+
+|+ RAG-Fusion (4 variants)
+|1.6x
+|2.5x
+|Modest recall gain for the worst latency multiplier here
+
+|+ agentic loop (avg 3 steps)
+|4.0x
+|4.0x
+|Necessary for multi-hop; ruinous as a default
+|===
+
+Two entries deserve attention. *Contextual compression can be cost-negative* —
+trimming 60% of the context saves more in input tokens than the embedding pass
+costs. And *RAG-Fusion has the worst latency-to-benefit ratio* of anything
+commonly recommended; measure it on your own eval set before shipping it, because
+the published wins are corpus-dependent and the latency cost is not.
+
+== Index-Time Costs
+
+One-off or per-document costs, invisible at query time and easy to under-budget.
+
+[cols="2,2,3", options="header"]
+|===
+|Operation |Cost per 1M corpus tokens |Notes
+
+|Layout parsing (Docling, local)
+|~1-3 GPU-minutes per 100 pages
+|CPU works; roughly 5x slower
+
+|Embedding (local, `bge-small`)
+|~2 GPU-minutes
+|Batch aggressively — 1000 chunks per call, not 1000 calls
+
+|Embedding (hosted API)
+|~£0.02-0.13
+|Cheap; the rate limit binds before the bill does
+
+|xref:RAG_Techniques.adoc#_contextual_retrieval[Contextual Retrieval]
+|~£1 *with* prompt caching
+|~£10+ without. Caching is what makes it viable
+
+|RAPTOR tree build
+|~£5-20
+|Clustering + an LLM summary per cluster per level
+
+|GraphRAG extraction
+|~£20-100
+|Entity extraction per chunk plus community summarisation. The most expensive option in these documents by an order of magnitude
+
+|ColPali page embedding
+|~1 GPU-second per page
+|Plus ~200x the vector storage
+|===
+
+*Budget re-indexing, not just indexing.* Changing the embedding model, the
+chunker, or the Contextual Retrieval prompt means paying the full cost again —
+see xref:RAG_Document_Management.adoc#_re_indexing[Re-indexing]. A technique that
+is affordable once and unaffordable quarterly is a trap.
+
+== Storage
+
+[cols="2,2,2", options="header"]
+|===
+|Configuration |Per 1M chunks |Relative
+
+|768-d float32
+|~3.0 GB
+|1.0x
+
+|768-d float16
+|~1.5 GB
+|0.5x
+
+|768-d int8
+|~0.8 GB
+|0.25x
+
+|768-d binary
+|~0.1 GB
+|0.03x
+
+|Matryoshka 768→256, int8
+|~0.26 GB
+|0.09x
+
+|ColBERT / ColPali late interaction
+|~300 GB
+|100x
+|===
+
+HNSW graph overhead adds roughly 40-100% on top of the raw vectors, which is
+routinely forgotten in capacity planning. See
+xref:RAG_Embeddings.adoc#_quantisation[quantisation] for the accuracy cost of
+each row — int8 is near-free and should generally be the default.
+
+== A Latency Budget You Can Design Against
+
+[mermaid]
+....
+flowchart TB
+    B([Total budget]) --> T1 & T2 & T3
+
+    subgraph T1["≤ 500 ms — autocomplete, inline"]
+        direction TB
+        A1["Dense only, no rerank<br/>Small local embedder<br/>Cached/streamed generation<br/>❌ no LLM in the query path"]
+    end
+
+    subgraph T2["≤ 2 s — interactive chat"]
+        direction TB
+        A2["Hybrid + local cross-encoder<br/>Embeddings compression<br/>Rewrite ONLY on follow-ups<br/>Stream the answer"]
+    end
+
+    subgraph T3["≤ 30 s — research, async"]
+        direction TB
+        A3["Agentic multi-step<br/>RAG-Fusion, LLM compression<br/>Multi-index federation<br/>Show progress, not a spinner"]
+    end
+
+    style T1 fill:#fce8e6,stroke:#ea4335
+    style T2 fill:#e6f4ea,stroke:#34a853
+    style T3 fill:#e8f0fe,stroke:#4285f4
+....
+
+*The 2-second interactive tier is where most products live*, and it has a
+specific shape: everything except generation must fit in ~400 ms, which allows
+hybrid retrieval plus a local cross-encoder and nothing else in the query path.
+A query-rewrite LLM call fits *only* if you make it conditional — which is
+exactly what xref:RAG_Conversational_Memory.adoc#_query_contextualisation[skipping
+contextualisation on turn 1] does.
+
+== Levers, Cheapest First
+
+[cols="1,3,2", options="header"]
+|===
+|Lever |What it does |Costs you
+
+|*Stream the response*
+|Time-to-first-token drops to ~300 ms; total time is unchanged but *perceived* latency roughly halves
+|Nothing. Do this first
+
+|*Cap output tokens*
+|Generation scales with output length more than input length
+|Terser answers
+
+|*Prompt caching*
+|Cache the system prompt and any stable prefix: ~90% off those input tokens
+|Nothing, if the prefix is genuinely stable
+
+|*Semantic query cache*
+|Embed the query, return a stored answer above a similarity threshold. 20-40% hit rates are common on real traffic
+|Staleness; needs invalidation on re-index
+
+|*int8 quantisation*
+|4x less memory, ~1% recall
+|Effectively nothing
+
+|*Conditional stages*
+|Classify the query, then skip rewrite/fusion/agent for the simple majority
+|A classifier to maintain
+
+|*Parallelise*
+|Dense and BM25 concurrently; multi-query variants concurrently
+|Some code complexity
+
+|*Smaller reranker*
+|MiniLM-L6 instead of a 568M multilingual model: 10x faster, a few points of nDCG
+|Measurable accuracy
+
+|*Smaller generator*
+|The largest single lever on both cost and latency
+|The most accuracy
+|===
+
+*Conditional execution is the highest-leverage structural change.* Real traffic
+is dominated by simple queries. Routing them down a fast path and reserving the
+expensive pipeline for the minority that needs it typically cuts mean cost and
+latency by more than half, without giving up the hard-question quality that
+motivated the expensive stages.
+
+[source,python]
+----
+# The cheapest useful router: length + question-type heuristics, no model call.
+def needs_expensive_path(query: str, history: list) -> bool:
+    return (
+        len(query.split()) > 15                       # compound or descriptive
+        or any(w in query.lower() for w in ("compare", "versus", "difference",
+                                            "why", "how many", "across"))
+        or bool(history)                              # a follow-up needs rewriting
+    )
+----
+
+Measure the router's own error rate: sending a hard question down the fast path
+is a quality regression that no downstream stage can see.
+
+== Measuring It
+
+Log per-stage timings on every request. Without them, latency work is guesswork,
+and the stage everyone blames is rarely the stage responsible.
+
+[source,python]
+----
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def stage(trace: dict, name: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        trace[name] = round((time.perf_counter() - start) * 1000, 1)
+
+trace = {}
+with stage(trace, "retrieve"):
+    candidates = retriever.rrf(query, k=50)
+with stage(trace, "rerank"):
+    chunks = rerank(query, candidates, top_n=5)
+with stage(trace, "generate"):
+    answer = generate(query, chunks)
+# trace -> {"retrieve": 11.3, "rerank": 78.9, "generate": 2104.2}
+----
+
+The `Trace` dataclass in
+xref:examples/production_rag_pipeline.py[`examples/production_rag_pipeline.py`]
+does this alongside the retrieval ids, which is what makes an
+xref:RAG_Evaluation.adoc#_an_ablation_discipline[ablation table] possible.
+
+*Report p95, not the mean.* RAG latency distributions have long tails — a cold
+reranker, a rate-limited embedding call, an agent that took five steps instead of
+two. The mean hides exactly the requests users complain about.
+
+*Track cost per query as a first-class metric* next to accuracy. A change that
+improves faithfulness by two points and triples cost is a decision someone should
+make explicitly, and they can only do that if both numbers appear in the same
+table.
+
+== Putting It Together
+
+Extend the xref:RAG_Evaluation.adoc#_an_ablation_discipline[ablation table] with
+cost and latency columns, and the trade-offs become arguable rather than
+aesthetic:
+
+[cols="2,1,1,1,1,2", options="header"]
+|===
+|Configuration |hit@10 |MRR |p95 ms |£/1k |Verdict
+
+|Dense only
+|0.62
+|0.41
+|180
+|4.0
+|Baseline
+
+|+ hybrid
+|0.81
+|0.55
+|205
+|4.0
+|✅ Ship — free recall
+
+|+ rerank (local)
+|0.81
+|0.79
+|340
+|4.0
+|✅ Ship — free precision
+
+|+ compression
+|0.81
+|0.79
+|380
+|3.4
+|✅ Ship — cheaper *and* better
+
+|+ RAG-Fusion
+|0.84
+|0.80
+|1250
+|6.4
+|⚠️ +3 pts recall for 3x latency — only if the budget allows
+
+|+ agentic
+|0.88
+|0.85
+|4100
+|16.0
+|⚠️ Route to it conditionally, never by default
+|===
+
+Illustrative numbers — the *shape* is what recurs. Run it on your own corpus;
+that is the whole argument of xref:RAG_Evaluation.adoc[Evaluation], and the cost
+columns are what turn it into a decision rather than a leaderboard.

@@ -1,0 +1,68 @@
+= Observability Examples
+:doctype: article
+:toc: left
+:toclevels: 2
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Runnable companions to xref:../LLM_Observability_AWS.adoc[LLM Observability on AWS].
+
+[source,bash]
+----
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+export ENVIRONMENT=dev
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Aurora Serverless v2 — point DB_HOST at the RDS Proxy endpoint in AWS.
+# Locally, any Postgres will do:
+export DB_HOST=localhost DB_NAME=llm DB_USER=llm_app
+export DB_IAM_AUTH=false DB_PASSWORD=localdev
+psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "$(python -c 'import sessions;print(sessions.SCHEMA)')" 
+
+uvicorn app:app --port 8080
+
+curl -s localhost:8080/chat \
+  -H "Authorization: Bearer devtoken123" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"hello"}'
+----
+
+Each request prints two kinds of line to stdout: structured JSON logs, and EMF
+records that CloudWatch turns into metrics once the awslogs driver ships them.
+Locally you just see the JSON — which is the point, the same records work in
+both places.
+
+== Reading order
+
+[source,text]
+----
+context.py            # the identity chain everything else depends on
+  └─ emf.py           # how a metric reaches CloudWatch, and the cardinality rule
+     └─ litellm_callback.py   # where cost, tokens and model timing are captured
+        └─ sessions.py        # session created in FastAPI, id shared with LiteLLM
+           └─ app.py          # it all wired together
+              └─ alarms.py    # alarms on metrics, queries on properties
+----
+
+`ecs_task_definition.json` carries the deployment-side notes — log driver mode,
+secrets, task-role permissions, and why there is no `cloudwatch:PutMetricData`.
+
+== Verified
+
+`emf.py` is executed and asserted in isolation (record shape, dimension sets,
+single-line output, the dimension/property overlap guard).
+
+Every SQL statement in `sessions.py` — the DDL, the three named queries and all
+eight inline statements — is parse-checked against the real PostgreSQL grammar
+via `pglast` (libpg_query). Add that to CI if you extend them:
+
+[source,python]
+----
+import pglast, sessions
+pglast.parse_sql(sessions.SCHEMA)
+----
+
+The rest is syntax-checked only — the AWS and LiteLLM paths need credentials and
+a live account to exercise.

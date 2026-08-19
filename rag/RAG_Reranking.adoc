@@ -1,0 +1,307 @@
+= Reranking
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Reranking is the highest accuracy-per-line-of-code upgrade available to a RAG
+system. Adding a cross-encoder to a working hybrid pipeline is usually thirty
+lines and typically worth +10-25 points of nDCG@5.
+
+📄 xref:examples/cross_encoder_rerank.py[`examples/cross_encoder_rerank.py`]
+
+== Retrieval Is Recall; Ranking Is Precision
+
+A bi-encoder has to embed the document *before it has seen the query*. That
+independence is exactly what makes ANN search over millions of vectors possible,
+and exactly why the resulting order is coarse.
+
+[mermaid]
+....
+flowchart TB
+    subgraph BI["Bi-encoder — retrieval"]
+        direction LR
+        BQ[Query] --> BE1[Encoder] --> BV1[vector]
+        BD[Doc] --> BE2[Encoder] --> BV2[vector]
+        BV1 --> COS["cos(q, d)"]
+        BV2 --> COS
+    end
+
+    subgraph CE["Cross-encoder — reranking"]
+        direction LR
+        CQ[Query] --> CAT["[CLS] query [SEP] doc [SEP]"]
+        CD[Doc] --> CAT
+        CAT --> ENC[Transformer<br/>full cross-attention] --> SC[relevance score]
+    end
+
+    BI -->|"docs precomputed<br/>→ can search millions<br/>→ coarse ordering"| U1[ ]
+    CE -->|"cannot precompute<br/>→ only ~50 candidates<br/>→ precise ordering"| U2[ ]
+
+    style BI fill:#e6f4ea,stroke:#34a853
+    style CE fill:#fce8e6,stroke:#ea4335
+....
+
+The cross-encoder sees every query token attend to every document token. It can
+tell that "the refund is *not* processed automatically" answers a different
+question than "the refund *is* processed automatically" — a distinction a single
+pooled vector routinely loses.
+
+The cost is that relevance is only computable *per pair*, so the model must run
+once per candidate. That is `O(candidates)` forward passes, which is why it is a
+second stage and not a search index.
+
+== The Two-Stage Architecture
+
+[mermaid]
+....
+flowchart LR
+    C[("Corpus<br/>1,000,000 chunks")] --> S1
+
+    subgraph S1["Stage 1 — recall"]
+        direction TB
+        H["Hybrid retrieval<br/>dense + BM25 + RRF"]
+        H --> N1["top 50"]
+    end
+
+    S1 --> S2
+
+    subgraph S2["Stage 2 — precision"]
+        direction TB
+        X["Cross-encoder<br/>50 forward passes"]
+        X --> N2["top 5"]
+    end
+
+    S2 --> G[LLM]
+
+    M1["~5 ms<br/>ANN + inverted index"] -.- S1
+    M2["~50-200 ms<br/>batched on CPU/GPU"] -.- S2
+    M3["~2000 ms"] -.- G
+
+    style S1 fill:#e6f4ea,stroke:#34a853
+    style S2 fill:#fce8e6,stroke:#ea4335
+....
+
+*The rule that governs everything:* a reranker can only reorder what retrieval
+gave it. If the right chunk is not in the top 50, no reranker recovers it. So
+diagnose recall first (hit-rate@50), fix it with
+xref:RAG_Hybrid_Search.adoc[hybrid search] and
+xref:RAG_Chunking.adoc[chunking], and only then add precision.
+
+== Model Families
+
+[cols="1,2,2,1,1", options="header"]
+|===
+|Family |How it scores |Trade-off |Precompute? |Speed
+
+|*Bi-encoder*
+|`cos(f(q), f(d))`
+|Fast, coarse
+|✅
+|⚡⚡⚡
+
+|*Late interaction* (ColBERT)
+|`Σᵢ maxⱼ qᵢ·dⱼ` over token vectors
+|Middle ground; ~100x storage
+|✅
+|⚡⚡
+
+|*Cross-encoder*
+|`g([q ; d])` — one pass per pair
+|Precise, `O(n)` calls
+|❌
+|⚡
+
+|*LLM reranker*
+|Prompt the model to rank or score
+|Most flexible, most expensive
+|❌
+|🐌
+|===
+
+=== Cross-Encoders Worth Knowing
+
+[cols="2,1,1,3", options="header"]
+|===
+|Model |Size |Host |Notes
+
+|`cross-encoder/ms-marco-MiniLM-L-6-v2`
+|22M
+|local
+|The workhorse. ~10 ms for 50 pairs on CPU. English only.
+
+|`cross-encoder/ms-marco-MiniLM-L-12-v2`
+|33M
+|local
+|Slightly better, ~2x slower
+
+|`BAAI/bge-reranker-v2-m3`
+|568M
+|local
+|Strong multilingual default; needs a GPU for good latency
+
+|`BAAI/bge-reranker-base` / `-large`
+|278M / 560M
+|local
+|Solid English/Chinese
+
+|`jina-reranker-v2-base-multilingual`
+|278M
+|local/API
+|Fast, multilingual, handles code and tables well
+
+|`mixedbread-ai/mxbai-rerank-large-v2`
+|~500M
+|local
+|Competitive open weights
+
+|Cohere `rerank-v3.5`
+|—
+|API
+|No GPU to operate; strong quality; per-call cost
+
+|Voyage `rerank-2`
+|—
+|API
+|Long documents, strong benchmarks
+|===
+
+image::../img/reranking_models.png[Reranking models, width=800]
+image::../img/reranking_models_2.png[Reranking models comparison, width=800]
+
+== Using It
+
+[source,python]
+----
+from sentence_transformers import CrossEncoder
+
+reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
+pairs = [(query, chunk.text) for chunk in candidates]
+scores = reranker.predict(pairs)                      # batched internally
+top = sorted(zip(candidates, scores), key=lambda cs: -cs[1])[:5]
+----
+
+*Scores are raw logits.* They are comparable *within* one query's candidate list,
+not across queries — a score of 3.1 does not mean the same thing for two
+different questions. Use them for ordering. If you need an absolute cutoff
+("return nothing rather than something weak"), calibrate a threshold on your own
+labelled set; do not guess one.
+
+== Tuning
+
+[cols="1,1,3", options="header"]
+|===
+|Parameter |Start at |Reasoning
+
+|`candidates` (stage 1 `k`)
+|4-10x `top_n`
+|Too few and the reranker cannot fix a recall miss; too many and latency grows linearly for diminishing precision
+
+|`top_n` (what the LLM sees)
+|3-8
+|Bounded by context budget and by the lost-in-the-middle effect, not by what fits
+
+|Batch size
+|32-64
+|Latency is dominated by batching efficiency, not model size
+
+|Max pair length
+|512 tokens
+|Longer chunks get truncated *silently* — verify your chunks fit, or the tail is never scored
+|===
+
+That last row causes real bugs: rerank a 2000-token parent chunk with a
+512-token cross-encoder and it scores only the first quarter. Rerank the *child*
+chunks and expand to parents afterwards — which is why the pipeline order in
+xref:RAG_Overview.adoc#_the_production_pipeline[the production pipeline] puts
+parent expansion after reranking.
+
+== LLM Rerankers
+
+Instead of a dedicated model, prompt an LLM. Three shapes:
+
+[cols="1,2,2", options="header"]
+|===
+|Shape |Prompt |Cost
+
+|*Pointwise*
+|"Rate this passage's relevance 0-10"
+|N calls — expensive, and scores are poorly calibrated
+
+|*Pairwise*
+|"Which passage better answers the question, A or B?"
+|O(n log n) comparisons — accurate, slow
+
+|*Listwise*
+|"Here are 20 passages. Output the ids in relevance order."
+|1 call — best cost/quality; the basis of RankGPT
+|===
+
+Listwise is the practical one. It also handles instructions a trained reranker
+cannot ("prefer the most recent policy version", "prefer official docs over
+forum posts"), which is the real reason to reach for it. The cost is one extra
+LLM call and a chunk of latency.
+
+== Diversity: MMR
+
+Reranking optimises relevance, which can return five near-identical chunks — a
+common outcome when a corpus has versioned or duplicated documents. Maximal
+Marginal Relevance trades a little relevance for coverage:
+
+----
+MMR = argmax  [ lambda * rel(d, q) - (1 - lambda) * max sim(d, s) ]
+      d ∈ R\S                                      s ∈ S
+
+  R = ranked candidates,  S = already selected
+----
+
+[source,python]
+----
+def mmr(query_vec, doc_vecs, docs, k=5, lam=0.7):
+    selected, remaining = [], list(range(len(docs)))
+    while len(selected) < k and remaining:
+        best = max(remaining, key=lambda i:
+            lam * float(doc_vecs[i] @ query_vec)
+            - (1 - lam) * max((float(doc_vecs[i] @ doc_vecs[j]) for j in selected), default=0.0))
+        selected.append(best)
+        remaining.remove(best)
+    return [docs[i] for i in selected]
+----
+
+`λ = 0.7` is a reasonable default. Apply MMR *after* reranking, on the reranked
+scores. Useful for broad or comparison questions; unhelpful for narrow factual
+ones, where you actually do want the five most relevant chunks.
+
+== When Reranking Does Not Help
+
+* *Recall is the bottleneck.* If hit-rate@50 is 0.6, reranking cannot get you
+  past 0.6. Fix retrieval first.
+* *Very small corpora.* With 50 chunks total, first-stage ordering is already
+  near-optimal.
+* *Hard latency budgets.* If you have 200 ms end-to-end, a MiniLM reranker over
+  20 candidates may still fit — but a 568M multilingual one will not.
+* *Chunks longer than the reranker's window.* Silent truncation; rerank children
+  instead.
+
+== Measuring the Gain
+
+Report both, before and after:
+
+[cols="1,3", options="header"]
+|===
+|Metric |What it tells you
+
+|`hit-rate@k`
+|Whether *any* relevant chunk is in the top k. Reranking should not change hit-rate@50 at all — if it does, something is wrong.
+
+|`MRR`
+|1/rank of the first relevant hit. This is what reranking actually improves — moving the answer from rank 8 to rank 1.
+
+|`nDCG@5`
+|Graded relevance with a positional discount. The headline number.
+|===
+
+Implementations in xref:examples/ragas_eval.py[`examples/ragas_eval.py`]; the
+broader measurement discipline is in xref:RAG_Evaluation.adoc[Evaluation].

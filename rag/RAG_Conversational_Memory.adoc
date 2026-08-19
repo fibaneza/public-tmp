@@ -1,0 +1,234 @@
+= Conversational Memory and Follow-up Questions
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Multi-turn RAG breaks in a specific, reproducible place. Turn 1 works because
+the query is self-contained. Turn 2 is "what does it do?" — and that string,
+embedded on its own, is equidistant from every document you own.
+
+📄 xref:examples/conversational_memory.py[`examples/conversational_memory.py`]
+
+== The Failure
+
+[mermaid]
+....
+sequenceDiagram
+    participant U as User
+    participant R as Retriever
+    participant L as LLM
+
+    U->>R: "How do I roll back a deployment?"
+    R->>R: embed → strong match
+    R->>L: [runbook p.3 — rollback]
+    L->>U: "Run payctl rollback --to <release>."
+
+    Note over U,L: ── turn 2 ──
+
+    U->>R: "What does it do to in-flight requests?"
+    R->>R: embed("what does it do to<br/>in-flight requests?")
+    Note right of R: ❌ "it" has no referent.<br/>The vector is near-noise.
+    R->>L: [random chunks about<br/>idempotency and ledgers]
+    L->>U: "I don't have information about that."
+....
+
+The model is not at fault — retrieval handed it the wrong documents. The fix
+belongs in front of retrieval.
+
+== Query Contextualisation
+
+Rewrite the follow-up into a standalone question using the history, retrieve with
+the rewrite, and answer as the original turn.
+
+[mermaid]
+....
+flowchart TB
+    H["History:<br/>Q: 'how do I roll back a deployment?'<br/>A: 'run payctl rollback --to...'"] --> C
+    F["Follow-up:<br/>'what does it do to in-flight requests?'"] --> C
+    C["LLM: rewrite as<br/>a standalone question"]
+    C --> S["'What does the payctl rollback<br/>command do to in-flight requests<br/>during a payments deployment?'"]
+    S --> R[Retrieve] --> CTX[Correct chunks]
+    CTX --> G["Generate — but the model sees<br/>the ORIGINAL phrasing,<br/>not the rewrite"]
+    F -.->|original wording| G
+    G --> A[Answer]
+
+    style C fill:#fef7e0,stroke:#fbbc04
+    style G fill:#f3e8fd,stroke:#a142f4
+....
+
+Three details that separate a working implementation from a fragile one:
+
+. *The rewriter must be able to pass through.* An already-standalone question
+  should come back unchanged. Rewriting a good question usually damages it —
+  the rewriter narrows it, or invents a topic from the previous turn that the
+  user has moved on from.
+. *The generator sees the original.* The rewrite is a retrieval device. Answering
+  the rewrite instead of the user's actual words produces answers that feel
+  subtly off-target.
+. *Skip it on turn 1.* Free latency saving, and no risk of a spurious rewrite.
+
+[source,text]
+----
+Given the conversation so far and the user's latest message, rewrite the latest
+message as a standalone question that makes sense on its own. Resolve every
+pronoun and ellipsis using the history. Do NOT answer the question.
+If the latest message is already standalone, return it unchanged.
+
+Conversation so far:
+{history}
+
+Latest message: {question}
+Standalone question:
+----
+
+== Bounding the History
+
+History cannot grow without limit — cost, latency and the rewriter's own accuracy
+all degrade. The standard structure is a *sliding window plus a rolling summary*.
+
+[mermaid]
+....
+flowchart LR
+    subgraph MEM["Memory"]
+        direction TB
+        S["Rolling summary<br/>(turns 1-14, ~120 words)"]
+        W["Verbatim window<br/>(turns 15-20)"]
+    end
+
+    T21[New turn 21] --> W
+    W -->|"overflow: turn 15<br/>evicted"| SUM[LLM: fold into summary]
+    SUM --> S
+
+    S --> P[Prompt]
+    W --> P
+
+    style S fill:#e8f0fe,stroke:#4285f4
+    style W fill:#e6f4ea,stroke:#34a853
+....
+
+Fold evicted turns into the summary rather than dropping them — otherwise turn 20
+loses the constraint the user set in turn 2 ("I'm on the EU instance"). Keep the
+summary short and entity-dense: names, decisions, constraints; drop pleasantries.
+
+[cols="1,2,2", options="header"]
+|===
+|Memory type |Holds |Lifetime
+
+|*Buffer window*
+|Last N turns, verbatim
+|Session
+
+|*Rolling summary*
+|Compressed older turns
+|Session
+
+|*Retrieved-context cache*
+|Chunks fetched this session
+|Session — lets a genuine follow-up skip retrieval
+
+|*Entity memory*
+|Facts about the user or subject ("account tier: enterprise")
+|Session or persistent
+
+|*Long-term / profile memory*
+|Preferences, prior conversations, stored in their own vector index
+|Persistent, needs consent and a deletion path
+|===
+
+== Topic Shift Detection
+
+Not every follow-up is a follow-up. "And how long are idempotency keys kept?"
+after a rollback conversation is a *new* topic wearing follow-up grammar — and
+contextualising it against the previous turn actively corrupts it ("How long are
+idempotency keys kept *during a rollback*?").
+
+[mermaid]
+....
+flowchart TB
+    Q[New message] --> D{Topic shift?}
+    D -->|"cos(new, history) < 0.3<br/>OR no pronouns/ellipsis<br/>OR classifier says 'new'"| NEW["Treat as standalone<br/>Skip contextualisation<br/>Clear the context cache"]
+    D -->|otherwise| FU["Contextualise<br/>against history"]
+    NEW --> R[Retrieve]
+    FU --> R
+
+    style NEW fill:#e8f0fe,stroke:#4285f4
+    style FU fill:#fef7e0,stroke:#fbbc04
+....
+
+Cheap signals that work well in combination: cosine similarity between the new
+message and the recent history; presence of unresolved pronouns or a leading
+conjunction; and simply letting the rewriter decide — a good rewrite prompt
+already returns an independent question unchanged, which is the same behaviour
+by another route.
+
+== Retrieval Caching Across Turns
+
+A real follow-up about the same documents does not need a new search. Keep the
+chunks retrieved this session and try them first:
+
+[source,python]
+----
+def ask(self, question):
+    standalone = self.contextualize(question)
+    # If the cached chunks still score well against the rewritten query,
+    # answering from them is both faster and more coherent across turns.
+    if self.last_chunks and self.score(standalone, self.last_chunks) > CACHE_THRESHOLD:
+        chunks = self.last_chunks
+    else:
+        chunks = self.retriever.rrf(standalone, k=4)
+        self.last_chunks = chunks
+    ...
+----
+
+Beyond latency, this improves *consistency*: turn 3 answering from a different
+chunk than turn 2 is how a conversation ends up contradicting itself.
+
+== Agentic Alternative
+
+xref:RAG_Architectures.adoc#_agentic_rag[Agentic RAG] gets follow-up handling
+almost for free — the whole conversation is in the message history, so when the
+model decides to call the search tool it writes a query that already resolves the
+pronouns. No separate rewriter, no topic-shift heuristic.
+
+The trade-off is the usual one: an explicit rewriter is one predictable extra
+call; an agent's cost and latency vary per turn, and it can decide not to
+retrieve when it should have.
+
+== Failure Modes
+
+[cols="1,2,2", options="header"]
+|===
+|Failure |Cause |Fix
+
+|"What does it do?" returns nothing
+|No contextualisation
+|Add the rewriter
+
+|Follow-up answered about the *previous* topic
+|Rewriter over-anchored on history
+|Detect topic shift; let the rewriter return the query unchanged
+
+|Answer feels like it addressed a different question
+|Generator saw the rewrite, not the original
+|Pass the original phrasing to the generator
+
+|Latency creeps up over a long session
+|Unbounded history
+|Sliding window + rolling summary
+
+|Turn 12 contradicts turn 4
+|Different chunks retrieved for the same topic
+|Cache retrieved context per session; surface the citation each turn
+
+|"Delete my data" does nothing
+|Persistent memory with no deletion path
+|Key long-term memory by user id; make deletion a first-class operation
+
+|Rewriter leaks another user's context
+|Shared session store keyed loosely
+|Scope session state by authenticated user; never by a client-supplied id alone
+|===

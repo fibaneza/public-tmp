@@ -1,0 +1,116 @@
+{
+  "_comment": "ECS Fargate task definition for the FastAPI + LiteLLM gateway. The awslogs driver ships stdout to CloudWatch Logs, where EMF records are turned into metrics automatically — no PutMetricData, no metrics agent, no sidecar. Session state lives in Aurora Serverless v2 (PostgreSQL), reached through RDS Proxy.",
+
+  "family": "llm-gateway",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+
+  "executionRoleArn": "arn:aws:iam::123456789012:role/llmGatewayExecutionRole",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/llmGatewayTaskRole",
+
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "123456789012.dkr.ecr.eu-west-1.amazonaws.com/llm-gateway:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
+
+      "environment": [
+        { "name": "ENVIRONMENT", "value": "prod" },
+        { "name": "LLM_MODEL", "value": "claude-opus-5" },
+        { "name": "LOG_GROUP", "value": "/ecs/llm-gateway" },
+        { "name": "PYTHONUNBUFFERED", "value": "1" },
+
+        {
+          "_comment": "Point at the RDS PROXY endpoint, not the cluster writer endpoint. The proxy multiplexes many application connections onto few database ones and holds them across a failover or a Serverless v2 scaling event, which the driver would otherwise see as dropped sockets.",
+          "name": "DB_HOST",
+          "value": "llm-proxy.proxy-abc123.eu-west-1.rds.amazonaws.com"
+        },
+        { "name": "DB_PORT", "value": "5432" },
+        { "name": "DB_NAME", "value": "llm" },
+        { "name": "DB_USER", "value": "llm_app" },
+
+        {
+          "_comment": "IAM auth means there is no database password anywhere — access is granted by the task role. Requires: CREATE USER llm_app; GRANT rds_iam TO llm_app;",
+          "name": "DB_IAM_AUTH",
+          "value": "true"
+        },
+
+        {
+          "_comment": "Per-TASK pool. Cluster-wide connections = tasks x DB_POOL_MAX. Aurora's max_connections scales with ACUs, so a large pool multiplied by autoscaled tasks is the classic way to exhaust a Serverless v2 cluster under exactly the load you provisioned it for.",
+          "name": "DB_POOL_MIN",
+          "value": "1"
+        },
+        { "name": "DB_POOL_MAX", "value": "5" },
+        { "name": "SESSION_TTL_SECONDS", "value": "604800" }
+      ],
+
+      "_comment_secrets": "Never put provider keys in `environment` — they are visible in the console, in DescribeTaskDefinition, and in every CI log that prints the task def. With DB_IAM_AUTH=true there is no database secret here at all.",
+      "secrets": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:eu-west-1:123456789012:secret:llm/anthropic-key"
+        }
+      ],
+
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/llm-gateway",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "api",
+          "_comment": "mode=non-blocking stops a CloudWatch Logs slowdown from blocking the application; max-buffer-size caps memory. The trade-off is that logs CAN be dropped under sustained pressure — acceptable for telemetry, not for an audit log you must retain.",
+          "mode": "non-blocking",
+          "max-buffer-size": "25m"
+        }
+      },
+
+      "healthCheck": {
+        "_comment": "Hits /healthz, which makes no LLM call but does run SELECT 1 — a task that cannot reach Aurora should be replaced, not left serving 500s. A health check that does INFERENCE bills you per probe, on every task, forever.",
+        "command": ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+
+      "_comment_stop_timeout": "Must exceed the pool's graceful close plus the longest in-flight LLM call, or draining is decorative.",
+      "stopTimeout": 120
+    }
+  ],
+
+  "_comment_iam_task_role": "The TASK role is what application code uses. Minimum policy for this app:",
+  "_iam_task_role_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AuroraIamAuth",
+        "_comment": "Grants a connection token for ONE database user. The resource path uses the cluster RESOURCE ID (cluster-XXXX), not the cluster name — a common and confusing mismatch. Scope to the specific db-user; a wildcard here grants every role in the cluster.",
+        "Effect": "Allow",
+        "Action": ["rds-db:connect"],
+        "Resource": "arn:aws:rds-db:eu-west-1:123456789012:dbuser:cluster-ABCDEFGHIJKL/llm_app"
+      },
+      {
+        "Sid": "LogsInsightsForBudgetJobOnly",
+        "_comment": "The API itself does NOT need logs:StartQuery — only the scheduled budget job does, and on this stack that job can read llm_usage in SQL instead. Keep the roles separate either way.",
+        "Effect": "Allow",
+        "Action": ["logs:StartQuery", "logs:GetQueryResults"],
+        "Resource": "arn:aws:logs:eu-west-1:123456789012:log-group:/ecs/llm-gateway:*"
+      }
+    ]
+  },
+
+  "_comment_no_putmetricdata": "Note the absence of cloudwatch:PutMetricData. With EMF the container never calls the CloudWatch API — metrics arrive through the log pipeline. That is one less permission, one less failure mode, and no added request latency.",
+
+  "_comment_no_db_secret": "Note also the absence of any Secrets Manager entry for the database. IAM auth generates a 15-minute token per connection; asyncpg is given a CALLABLE password so a reconnect after expiry mints a fresh one. Capturing the token once at startup works in testing and fails hours later in production.",
+
+  "_comment_networking": "Task security group must allow egress on 5432 to the RDS Proxy security group, and the proxy's SG must allow ingress from the task SG. Fargate tasks in private subnets also need a NAT gateway or VPC endpoints to reach Secrets Manager, CloudWatch Logs and the LLM provider.",
+
+  "_comment_serverless_v2": "Set the cluster's minimum ACU with the connection pool in mind: max_connections scales with ACUs, so a min of 0.5 ACU caps connections low enough that a few tasks can exhaust it. If the cluster is configured to scale to zero, the first request after idle pays a cold start — keep a floor above 0 for latency-sensitive paths.",
+
+  "_comment_log_retention": "Set retention on the log group explicitly — the default is 'never expire', which quietly becomes the largest line on the observability bill: aws logs put-retention-policy --log-group-name /ecs/llm-gateway --retention-in-days 30",
+
+  "_comment_expiry_job": "Postgres has no TTL. Schedule SessionStore.delete_expired() — EventBridge to a small scheduled task, or pg_cron inside the cluster. Without it, expired sessions accumulate until autovacuum is your largest ACU consumer."
+}

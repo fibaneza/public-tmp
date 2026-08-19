@@ -1,0 +1,397 @@
+= Chunking
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Chunking is the highest-variance decision in a RAG system and the one most often
+made by accident — `chunk_size=1000` copied from a tutorial. The chunk is the
+unit of retrieval *and* the unit of citation, so its boundaries decide both what
+can be found and what can be quoted.
+
+== Why It Dominates Everything Downstream
+
+[mermaid]
+....
+flowchart LR
+    C[Chunk<br/>boundaries] --> E[What the<br/>embedding encodes]
+    C --> R[What can be<br/>retrieved at all]
+    C --> A[Whether the chunk<br/>can answer alone]
+    C --> Q[What you can<br/>quote and cite]
+    E & R & A & Q --> O[Answer quality]
+
+    X["No reranker, prompt or model<br/>can recover a fact that was<br/>split across two chunks"] -.-> O
+
+    style C fill:#e8f0fe,stroke:#4285f4
+    style X fill:#fce8e6,stroke:#ea4335
+....
+
+Three properties a good chunk has, and they pull against each other:
+
+. *Self-contained* — answerable without its neighbours. Pushes size up.
+. *Single-topic* — one idea, so its embedding means something. Pushes size down.
+. *Citable* — small enough that pointing at it is useful. Pushes size down.
+
+xref:RAG_Techniques.adoc#_parent_child_retrieval[Parent-Child retrieval] is the
+standard way to stop trading these off and get all three.
+
+== Structure-Aware Parsing
+
+Before deciding *how* to split, fix *what* you are splitting. A PDF has no
+paragraphs — it is a bag of positioned glyphs. `pypdf.extract_text()` walks them
+in storage order, which produces:
+
+* two-column papers interleaved line by line into nonsense
+* table cells emitted as a flat run of numbers with no header attached
+* headers, footers and page numbers spliced into the middle of sentences
+* headings indistinguishable from body text, so no hierarchy survives
+
+Chunk that stream and every downstream stage inherits the damage: the embedding
+encodes garbled text, the reranker faithfully ranks garbled text, and the
+citation points at a page whose content was never really there.
+
+[mermaid]
+....
+flowchart TB
+    PDF[/"PDF page:<br/>2 columns, a table,<br/>a header, a footnote"/]
+
+    PDF --> N["Naive extraction<br/>(pypdf)"]
+    PDF --> D["Layout analysis<br/>(Docling)"]
+
+    N --> N1["'Revenue 2023 ACME Corp<br/>Confidential 314 442 Q1 Q2<br/>see note 4 grew by'<br/>— reading order lost,<br/>table flattened,<br/>header inlined"]
+
+    D --> D1["DoclingDocument tree:<br/>§Financials > Table 1<br/>headers: [Quarter, Revenue]<br/>rows: [[Q1, 314], [Q2, 442]]<br/>reading order preserved<br/>footnote linked, header dropped"]
+
+    N1 --> BAD([❌ garbage in the index])
+    D1 --> GOOD([✅ chunk with real structure])
+
+    style N1 fill:#fce8e6,stroke:#ea4335
+    style D1 fill:#e6f4ea,stroke:#34a853
+....
+
+=== Docling
+
+link:https://github.com/docling-project/docling[Docling] (IBM, now a Linux
+Foundation AI project) runs real layout analysis — reading order, headings,
+tables, figures, code blocks, formulas — and emits a `DoclingDocument`: a *tree*,
+not a string.
+
+Its `HybridChunker` then chunks along that tree, combining two rules:
+
+* *structural* — never merge across a section boundary; keep a table with its
+  caption and column headers
+* *tokenizer budget* — split a section that exceeds the embedding model's window,
+  and merge sibling fragments that are far under it (`merge_peers=True`). That
+  second half is what stops a document of one-line bullets becoming 400
+  near-empty vectors.
+
+[source,python]
+----
+from docling.document_converter import DocumentConverter
+from docling.chunking import HybridChunker
+from transformers import AutoTokenizer
+
+doc = DocumentConverter().convert("report.pdf").document
+chunker = HybridChunker(
+    tokenizer=AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5"),
+    max_tokens=512,
+    merge_peers=True,
+)
+for chunk in chunker.chunk(doc):
+    embed_text = chunker.contextualize(chunk=chunk)  # prepends the heading path
+    page = chunk.meta.doc_items[0].prov[0].page_no   # for the citation
+----
+
+`contextualize()` is the detail people miss: it prepends the heading breadcrumb
+("Refund Policy > Processing > Exceptions") to the text you embed, while
+`chunk.text` stays clean for display and quoting. Disambiguating an otherwise
+generic chunk ("settles in 3-5 business days" appears in a dozen documents) is a
+one-line change with a measurable recall win.
+
+📄 xref:examples/docling_structure_chunking.py[`examples/docling_structure_chunking.py`]
+
+=== Parser Options
+
+[cols="1,2,2,1", options="header"]
+|===
+|Tool |Strength |Weakness |Local
+
+|link:https://github.com/docling-project/docling[Docling]
+|Excellent tables and reading order; native chunker; many formats
+|Slower than text extraction; models to download
+|✅
+
+|link:https://github.com/Unstructured-IO/unstructured[Unstructured]
+|Very broad format support; mature ecosystem
+|Quality varies by strategy; best modes are hosted
+|partial
+
+|link:https://github.com/run-llama/llama_parse[LlamaParse]
+|Strong on complex tables and forms
+|Hosted API, per-page cost
+|❌
+
+|link:https://github.com/datalab-to/marker[Marker]
+|Fast PDF → Markdown, good quality
+|PDF-focused
+|✅
+
+|Azure Document Intelligence
+|Best-in-class forms/handwriting, SLA
+|Cost, cloud dependency
+|❌
+
+|link:https://github.com/illuin-tech/colpali[ColPali]
+|Skips parsing entirely — embeds page images
+|Needs a multimodal stack end to end
+|✅
+
+|`pypdf` / `pdfplumber`
+|Zero dependencies, instant
+|No layout understanding
+|✅
+|===
+
+== Chunking Strategies
+
+Seven strategies, roughly in order of sophistication. All are implemented
+side by side in
+xref:examples/chunking_strategies.py[`examples/chunking_strategies.py`].
+
+[mermaid]
+....
+flowchart TB
+    T[Text] --> S1["① Fixed size<br/>text[i:i+N]"]
+    T --> S2["② Fixed + overlap<br/>step = N − M"]
+    T --> S3["③ Token-based<br/>size in tokens, not chars"]
+    T --> S4["④ Recursive<br/>¶ → line → sentence → word"]
+    T --> S5["⑤ Sentence-window<br/>embed 1, return n±1"]
+    T --> S6["⑥ Semantic<br/>cut where embeddings diverge"]
+    T --> S7["⑦ Structural<br/>cut on headings / tables"]
+
+    S1 --> B[❌ cuts facts in half]
+    S2 --> C[⚠️ safe but blind]
+    S3 --> D[✅ respects model limits]
+    S4 --> E[✅ good prose default]
+    S5 --> F[✅ precision + context]
+    S6 --> G[✅ topic-aligned, costs embeddings]
+    S7 --> H[✅✅ best when structure exists]
+
+    style S1 fill:#fce8e6,stroke:#ea4335
+    style S7 fill:#e6f4ea,stroke:#34a853
+....
+
+=== Fixed Size
+
+`text[i:i+500]`. Boundary-blind: a sentence — and therefore a fact — can be cut
+in half, leaving neither piece retrievable. Only acceptable for uniform machine
+text (logs, telemetry).
+
+=== Fixed Size with Overlap
+
+Every boundary-straddling fact gets a second chance to live intact in one chunk.
+Costs `overlap/size` extra storage and produces duplicate hits at query time —
+dedupe by id before building the prompt. 10-20% overlap is the standard range.
+
+[source,python]
+----
+step = size - overlap
+chunks = [text[i:i + size] for i in range(0, len(text), step)]
+----
+
+=== Token-Based
+
+Characters are a proxy for tokens and a bad one: code and CJK text run 2-4x more
+tokens per character than English prose, so a "500 character" chunk can silently
+exceed an embedding model's window and get truncated — losing the tail with no
+error. Size in tokens when the model's window is what you are respecting.
+
+[source,python]
+----
+import tiktoken
+enc = tiktoken.get_encoding("cl100k_base")
+ids = enc.encode(text)
+chunks = [enc.decode(ids[i:i+512]) for i in range(0, len(ids), 512 - 64)]
+----
+
+=== Recursive Character Splitting
+
+Try the most semantic separator available (`\n\n`), fall back to finer ones
+(`\n`, `. `, ` `) only for pieces still over budget. This is
+`RecursiveCharacterTextSplitter` and it is the right default for prose. Language-
+aware variants exist for code (split on class/function boundaries) and Markdown.
+
+=== Sentence-Window
+
+Index one sentence, return it with *n* neighbours. Retrieval precision comes from
+the single embedded sentence; answerability comes from the window handed to the
+LLM. Same insight as Parent-Child, expressed with an offset rather than a stored
+parent.
+
+=== Semantic Chunking
+
+Embed each sentence, measure cosine distance between consecutive sentences, and
+cut wherever the distance spikes.
+
+[mermaid]
+....
+flowchart LR
+    S1["s1: 'Refunds within<br/>14 days.'"] -->|"dist 0.12"| S2["s2: 'After 14 days,<br/>case by case.'"]
+    S2 -->|"dist 0.71 ⚡"| S3["s3: 'The ledger is<br/>append-only.'"]
+    S3 -->|"dist 0.19"| S4["s4: 'Balances are<br/>derived by folding.'"]
+
+    S2 -.->|"CUT — above the<br/>80th percentile"| B[boundary]
+
+    style B fill:#fce8e6,stroke:#ea4335
+....
+
+Use a *relative* threshold (percentile of this document's own distance
+distribution), not an absolute one. "Unusually different for this document"
+travels across corpora; a hard `0.3` does not.
+
+*Cost:* one embedding call per sentence at ingest. *Verdict:* frequently
+outperformed by good structural chunking, which gets the same boundaries for free
+because the author already marked them with headings.
+
+=== Structural Chunking
+
+Split on the document's own hierarchy — headings, list items, table rows, code
+blocks — and carry the heading path into the chunk. When the document has
+structure, this beats every inferred boundary, because the author's boundaries
+are ground truth and yours are a guess.
+
+[source,python]
+----
+# Always embed the breadcrumb with the body:
+embed_text = f"{' > '.join(headings)}\n\n{body}"
+# but keep `body` verbatim for citation and display.
+----
+
+=== Late Chunking
+
+Embed the whole document first (token-level), then pool per chunk — so every
+chunk's vector already carries document context. See
+xref:RAG_Techniques.adoc#_late_chunking[Late Chunking]. Requires a long-context
+embedding model with token-level output.
+
+== Sizing
+
+There is no universal answer, but there are defaults worth starting from and
+reasons to move off them.
+
+[cols="1,1,1,3", options="header"]
+|===
+|Content |Size (tokens) |Overlap |Why
+
+|Prose, docs, policies
+|300-600
+|10-15%
+|One or two paragraphs — enough for a self-contained idea
+
+|Technical / API reference
+|200-400
+|15%
+|Dense; a smaller window still holds a full concept
+
+|Code
+|function/class
+|0
+|Structural boundaries are ground truth; overlap is meaningless
+
+|Legal / contracts
+|clause
+|clause ±1
+|Clause boundaries are semantic *and* legal; never split one
+
+|FAQ / Q&A
+|one pair
+|0
+|The Q&A pair is already the ideal chunk
+
+|Chat / tickets
+|one thread or turn group
+|0
+|Threads are the unit of meaning
+
+|Tables
+|whole table + caption
+|—
+|Splitting a table detaches rows from headers, making them meaningless
+
+|Slides
+|one slide + notes
+|0
+|Author-defined units
+|===
+
+*How to actually choose:* build the eval set from
+xref:RAG_Evaluation.adoc[Evaluation], sweep chunk size over `{200, 400, 800}` and
+overlap over `{0, 10%, 20%}`, and measure hit-rate@10. That is nine cheap runs
+and it answers the question for *your* corpus, which no table can.
+
+== Chunk Metadata
+
+Every chunk should carry more than its text. This is what makes citations,
+filtering, deletion and debugging possible later — and retrofitting it means a
+full re-index.
+
+[source,python]
+----
+{
+    "id": "runbook::7::2",       # doc_id :: page :: chunk index — stable and parseable
+    "text": "...",               # VERBATIM source text — what you quote
+    "embed_text": "...",         # breadcrumb + context + text — what you embed
+    "doc_id": "runbook",         # enables delete/update by document
+    "doc_title": "Payments Runbook",
+    "source_uri": "s3://docs/runbook.pdf",
+    "page": 7,
+    "headings": ["Operations", "Rollback"],
+    "chunk_index": 2,
+    "chunk_count": 41,           # lets the UI show "2 of 41"
+    "parent_id": "runbook::sec::rollback",
+    "content_hash": "a3f9...",   # idempotent re-ingest
+    "version": "2024-06-01",
+    "acl": ["team:payments"],    # pre-filter, never post-filter
+    "ingested_at": "2024-06-01T10:00:00Z",
+}
+----
+
+*Keep `text` and `embed_text` separate.* The embedded string may contain a
+breadcrumb and an LLM-written contextual preamble; the quoted string must be
+verbatim source, or your
+xref:RAG_Citations.adoc#_quote_verification[quote verification] will fail on text
+the model copied correctly.
+
+== Common Mistakes
+
+[cols="1,3", options="header"]
+|===
+|Mistake |Consequence
+
+|Using `pypdf` and chunking the result
+|Every downstream stage inherits garbled text; nothing recovers it
+
+|Splitting a table from its header row
+|Rows become meaningless digits; the model invents column names
+
+|Chunk size in characters for code or CJK
+|Silent truncation at the embedding model's window
+
+|No overlap on prose
+|A fact split across a boundary becomes unretrievable
+
+|Overlap on structural chunks
+|Duplicate retrieval hits that crowd out distinct content
+
+|Embedding the breadcrumb but citing it
+|Citation quotes text that is not in the source document
+
+|One chunk per document
+|Embedding is the average of everything; retrieval becomes random
+
+|Never re-chunking after changing the embedding model
+|Chunks sized for a 512-token window on a model with a 8k window
+|===

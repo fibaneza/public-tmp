@@ -1,0 +1,343 @@
+= Hybrid Search: Semantic + BM25
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Dense vector search and lexical BM25 fail on *opposite* inputs. That is the whole
+argument for running both: fusing two retrievers with correlated errors averages
+out to mediocrity, but fusing two with anti-correlated errors covers both blind
+spots.
+
+📄 xref:examples/hybrid_search.py[`examples/hybrid_search.py`]
+
+== The Two Blind Spots
+
+[mermaid]
+....
+flowchart TB
+    subgraph DENSE["Dense / vector search"]
+        D1["✅ 'undo a release' finds<br/>'roll back a deployment'"]
+        D2["✅ paraphrase, synonym,<br/>translation, intent"]
+        D3["❌ 'ERR_4021' → nearest<br/>neighbours are other codes"]
+        D4["❌ 'PIT' → a 3-letter acronym<br/>embeds to near-noise"]
+        D5["❌ exact figures, product<br/>names, version numbers"]
+    end
+
+    subgraph SPARSE["BM25 / lexical search"]
+        S1["✅ 'ERR_4021' → exact,<br/>high IDF, unambiguous"]
+        S2["✅ 'PIT', '14 days', 'v2.3.1'"]
+        S3["✅ explainable: you can<br/>see which terms matched"]
+        S4["❌ 'undo a release' shares no<br/>term with 'roll back'"]
+        S5["❌ no notion of meaning"]
+    end
+
+    DENSE -.->|"covers"| S4
+    SPARSE -.->|"covers"| D3
+
+    style DENSE fill:#e6f4ea,stroke:#34a853
+    style SPARSE fill:#fef7e0,stroke:#fbbc04
+....
+
+A concrete test set, run against the corpus in `_common.py`:
+
+[cols="2,1,1,2", options="header"]
+|===
+|Query |Dense |BM25 |Why
+
+|"how do I undo a release?"
+|✅ rank 1
+|❌ not found
+|Document says "roll back a deployment" — zero term overlap
+
+|"what is a PIT?"
+|❌ rank 4
+|✅ rank 1
+|Rare acronym: high IDF for BM25, near-noise for the embedder
+
+|"14 days"
+|⚠️ rank 2
+|✅ rank 1
+|Numbers are weakly encoded by embeddings
+
+|"why would a customer feel misled?"
+|✅ rank 1
+|❌ not found
+|Pure intent, no shared vocabulary
+|===
+
+== How BM25 Works
+
+BM25 (Best Matching 25) is TF-IDF with two corrections that matter.
+
+----
+                        f(t,d) * (k1 + 1)
+score(q,d) = Σ  IDF(t) * ---------------------------------------
+             t∈q         f(t,d) + k1 * (1 - b + b * |d| / avgdl)
+----
+
+Plain reading of the three parts:
+
+* *IDF(t)* — a term appearing in few documents is worth more. This is why `PIT`
+  scores high and `the` scores nothing.
+* *Term-frequency saturation* (`k₁`, default 1.2) — the 10th occurrence of a term
+  adds far less than the 2nd. Plain TF-IDF lets a keyword-stuffed document win;
+  BM25 does not.
+* *Length normalisation* (`b`, default 0.75) — a long document is expected to
+  contain more of everything, so its raw counts are discounted.
+
+[mermaid]
+....
+flowchart LR
+    Q["Query: 'PIT incident'"] --> T[Tokenize + lowercase<br/>+ optional stem/stopword]
+    T --> L{{"For each term:<br/>IDF × saturated TF × length norm"}}
+    L --> SUM["Σ over query terms"]
+    SUM --> R[Ranked documents]
+
+    IDX[(Inverted index<br/>term → doc list)] -.-> L
+
+    style L fill:#fef7e0,stroke:#fbbc04
+....
+
+*Tokenisation matters more than the formula.* Lowercase and strip punctuation at
+minimum. Stemming ("refunds" → "refund") helps recall; a stopword list helps
+precision. For code or identifiers, split on camelCase and underscores, or `PITd`
+and `PIT` never match.
+
+== Fusion
+
+The two score scales are incomparable — BM25 is unbounded and corpus-dependent,
+cosine sits in `[-1, 1]`. You cannot add them.
+
+=== Reciprocal Rank Fusion
+
+RRF ignores raw scores entirely and uses only *rank*:
+
+----
+                       1
+RRF(d) =  Σ      ---------------          (kappa = 60 by convention)
+        r∈retrievers  kappa + rank_r(d)
+----
+
+[source,python]
+----
+def rrf(ranked_lists, k=5, kappa=60):
+    scores = defaultdict(float)
+    for ranked in ranked_lists:
+        for rank, doc in enumerate(ranked, start=1):
+            scores[doc.id] += 1.0 / (kappa + rank)
+    return sorted(scores.items(), key=lambda kv: -kv[1])[:k]
+----
+
+`κ = 60` comes from link:https://dl.acm.org/doi/10.1145/1571941.1572114[Cormack
+et al., 2009] and is what almost everyone ships. Its job is to damp the influence
+of the very top rank, so one confident retriever cannot monopolise the fused
+list.
+
+[mermaid]
+....
+flowchart LR
+    subgraph D["Dense ranking"]
+        D1["1. c1"]
+        D2["2. c5"]
+        D3["3. c3"]
+    end
+    subgraph S["BM25 ranking"]
+        S1["1. c3"]
+        S2["2. c1"]
+        S3["3. c6"]
+    end
+    subgraph F["RRF, κ=60"]
+        F1["c1: 1/61 + 1/62 = 0.0325"]
+        F2["c3: 1/63 + 1/61 = 0.0323"]
+        F3["c5: 1/62 = 0.0161"]
+        F4["c6: 1/63 = 0.0159"]
+    end
+    D --> F
+    S --> F
+    F --> O["c1, c3, c5, c6"]
+
+    style F fill:#fce8e6,stroke:#ea4335
+....
+
+Note what happened: `c1` and `c3` each ranked top-1 in one list and near-top in
+the other, so both beat `c5` and `c6` which only one retriever liked. That
+consensus behaviour is the point.
+
+*Pros:* no tuning, no normalisation, works across any number of retrievers, robust
+to a retriever that returns wild scores. *Con:* discards score magnitude, so a
+retriever that is *overwhelmingly* confident cannot express it.
+
+=== Weighted Score Fusion
+
+Min-max normalise each side into `[0,1]`, then blend:
+
+[source,python]
+----
+combined = alpha * norm(dense_scores) + (1 - alpha) * norm(sparse_scores)
+----
+
+More expressive — you can bias toward lexical for a code-heavy corpus — but
+`alpha` must be tuned per corpus, and the normalisation is only stable if you
+always normalise over the same candidate pool. Weaviate exposes exactly this as
+its `alpha` parameter (1.0 = pure vector, 0.0 = pure BM25).
+
+*Rule of thumb:* start with RRF. Move to weighted fusion only when you have an
+eval set showing a consistent lexical or semantic bias in your query mix.
+
+=== Rank Fusion vs Reranking
+
+They are not alternatives and people conflate them constantly.
+
+[cols="1,2,2", options="header"]
+|===
+|
+|Fusion (RRF)
+|Reranking (cross-encoder)
+
+|Input
+|Several ranked lists
+|One list of candidates
+
+|Uses
+|Ranks only
+|The actual query-document text
+
+|Cost
+|Free
+|One model forward pass per candidate
+
+|Can it find something retrieval missed?
+|No
+|No
+
+|Improves
+|Robustness / coverage
+|Precision at the top
+|===
+
+The production order is *fuse then rerank*: fusion builds a high-recall candidate
+pool from multiple sources, the reranker orders it precisely.
+
+== Sparse Neural Retrieval
+
+SPLADE and friends sit between BM25 and dense retrieval: a transformer produces a
+*sparse* vector over the vocabulary, expanding a document with terms it does not
+literally contain ("rollback" activates "revert", "undo", "downgrade") while
+keeping exact-match behaviour and an inverted index.
+
+[cols="1,2,2", options="header"]
+|===
+|
+|BM25
+|SPLADE / learned sparse
+
+|Vocabulary matching
+|Literal only
+|Expanded by the model
+
+|Index
+|Inverted index
+|Inverted index (same infrastructure)
+
+|Needs a GPU
+|No
+|Yes, at index and query time
+
+|Explainable
+|Fully
+|Mostly — you can see the activated terms
+|===
+
+`BAAI/bge-m3` conveniently emits dense, sparse *and* ColBERT-style vectors from
+one forward pass, which makes a three-way hybrid cheap to build.
+
+== Native Support
+
+[cols="1,3", options="header"]
+|===
+|Store |How
+
+|Qdrant
+|Named vectors: one dense, one sparse; `Query API` with a `fusion: rrf` prefetch
+
+|Weaviate
+|`hybrid(query=..., alpha=0.5)` — built-in BM25F + vector with weighted fusion
+
+|Elasticsearch / OpenSearch
+|`rrf` retriever combining a `knn` and a `match` query; BM25 is the native default
+
+|Milvus
+|`hybrid_search()` with `RRFRanker` or `WeightedRanker`
+
+|pgvector + Postgres
+|`ts_rank_cd` on a `tsvector` column plus `<=>` cosine, fused in SQL with a CTE
+
+|Azure AI Search
+|Native hybrid with built-in RRF and optional semantic reranker
+
+|Chroma / FAISS
+|No native sparse index — run `rank_bm25`/`bm25s` alongside and fuse in Python
+|===
+
+A pgvector hybrid query, since it is the least obvious:
+
+[source,sql]
+----
+WITH dense AS (
+  SELECT id, RANK() OVER (ORDER BY embedding <=> $1) AS rank
+  FROM chunks ORDER BY embedding <=> $1 LIMIT 50
+),
+sparse AS (
+  SELECT id, RANK() OVER (ORDER BY ts_rank_cd(tsv, plainto_tsquery($2)) DESC) AS rank
+  FROM chunks WHERE tsv @@ plainto_tsquery($2) LIMIT 50
+)
+SELECT COALESCE(d.id, s.id) AS id,
+       COALESCE(1.0/(60 + d.rank), 0) + COALESCE(1.0/(60 + s.rank), 0) AS score
+FROM dense d FULL OUTER JOIN sparse s USING (id)
+ORDER BY score DESC LIMIT 10;
+----
+
+== Tuning
+
+[cols="1,1,3", options="header"]
+|===
+|Parameter |Start at |Move it when
+
+|`k` per retriever
+|20-50
+|Raise if hit-rate@50 is short of your ceiling; a reranker downstream makes a larger pool cheap
+
+|RRF `κ`
+|60
+|Lower (10-20) to let a strong top-1 dominate; rarely worth changing
+
+|Fusion weight `alpha`
+|0.5 (or use RRF)
+|Toward lexical for code/IDs, toward dense for natural-language questions
+
+|BM25 `k₁`
+|1.2
+|Raise for long documents where repetition is meaningful
+
+|BM25 `b`
+|0.75
+|Lower toward 0 when document lengths vary wildly and length is not informative
+|===
+
+Every one of these should be moved on the evidence of
+xref:RAG_Evaluation.adoc#_retrieval_metrics[hit-rate@k and MRR on your own eval
+set], not on intuition.
+
+== Reference Repositories
+
+* link:https://github.com/kolhesamiksha/Hybrid-Search-RAG[kolhesamiksha/Hybrid-Search-RAG]
+* link:https://github.com/gwyer/hybrid-rag-project[gwyer/hybrid-rag-project]
+* link:https://github.com/qdrant/qdrant[Qdrant] — see the hybrid queries guide
+* link:https://github.com/xhluca/bm25s[bm25s] — fast pure-Python BM25
+* link:https://github.com/naver/splade[naver/splade] — learned sparse retrieval
+
+More in xref:RAG_Resources.adoc[Resources].

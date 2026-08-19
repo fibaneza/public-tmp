@@ -1,0 +1,394 @@
+= RAG Glossary
+:doctype: article
+:toc: left
+:toclevels: 2
+:sectnums:
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Terms used across the xref:README.adoc[RAG documents]. See also
+xref:../AI_terms.adoc[AI terms] for general ML vocabulary.
+
+== A
+
+*ANN (Approximate Nearest Neighbour)*:: Search that trades a small amount of
+recall for orders-of-magnitude speed. Exact search is `O(n)` per query; ANN
+indexes (HNSW, IVF, ScaNN) make million-vector search sub-millisecond. See
+xref:RAG_Embeddings.adoc#_ann_indexes[ANN indexes].
+
+*Agentic RAG*:: An architecture where retrieval is a *tool* the model calls
+rather than a fixed pipeline stage. The model decides whether to retrieve, what
+to search for, and whether to search again. See
+xref:RAG_Architectures.adoc#_agentic_rag[Agentic RAG].
+
+*Answer relevancy*:: RAGAS metric: does the answer address the question asked?
+Computed by generating questions the answer would answer and comparing them to
+the real one.
+
+*Asymmetric retrieval*:: The normal case in RAG: a short query must match a long
+passage. Contrast *symmetric* similarity (sentence vs sentence). Drives the need
+for xref:RAG_Embeddings.adoc#_symmetric_vs_asymmetric_and_prefixes[query/passage prefixes].
+
+*Attribution*:: Linking a generated claim to the source that supports it. See
+xref:RAG_Citations.adoc[Source Citations].
+
+== B
+
+*Beam width*:: In xref:RAG_Architectures.adoc#_hierarchical_rag[hierarchical
+retrieval], how many branches survive each level of the descent. Width 1 is
+fastest; a routing mistake is unrecoverable.
+
+*BEIR*:: A benchmark suite of heterogeneous retrieval tasks, used for
+zero-shot retrieval model comparison.
+
+*Bi-encoder*:: A model that embeds query and document *independently* into one
+vector each. Precomputable, hence searchable at scale; coarse, hence the need for
+a reranker. Contrast *cross-encoder*.
+
+*BM25*:: "Best Matching 25" — the standard lexical ranking function. TF-IDF plus
+term-frequency saturation and document-length normalisation. See
+xref:RAG_Hybrid_Search.adoc#_how_bm25_works[How BM25 works].
+
+== C
+
+*Chunk*:: The unit of retrieval and of citation. See
+xref:RAG_Chunking.adoc[Chunking].
+
+*ColBERT*:: A *late interaction* model: one vector per token, scored with MaxSim.
+Precomputable like a bi-encoder, term-sensitive like a cross-encoder, ~100x the
+storage.
+
+*ColPali*:: A vision model that embeds *page images* with ColBERT-style late
+interaction, skipping text extraction entirely for visually complex documents.
+See xref:RAG_Multimodal.adoc#_strategy_visual_document_retrieval_colpali[Visual document retrieval].
+
+*Context precision*:: RAGAS metric: of the retrieved chunks, how many were
+actually useful, weighted by rank. Low = noise.
+
+*Context recall*:: RAGAS metric: of the claims needed to answer, how many appear
+in the retrieved context. Low = the answer is unreachable. Your *ceiling*.
+
+*Context window*:: The token budget an LLM can attend to at once. Larger windows
+reduce, but do not remove, the need for retrieval.
+
+*Contextual compression*:: Post-retrieval filtering and sentence-level extraction
+of the retrieved set, query-aware. See
+xref:RAG_Techniques.adoc#_contextual_compression[Contextual Compression].
+
+*Contextual Retrieval*:: Anthropic's index-time technique: prepend an LLM-written
+situating preamble to each chunk before embedding. See
+xref:RAG_Techniques.adoc#_contextual_retrieval[Contextual Retrieval].
+
+*Conditional execution*:: Routing simple queries down a fast path and reserving
+the expensive pipeline for the minority that needs it. The highest-leverage
+structural change for cost and latency. See
+xref:RAG_Cost_Latency.adoc#_levers_cheapest_first[Levers].
+
+*Cosine similarity*:: Dot product of unit-normalised vectors. The default metric
+for text embeddings.
+
+*CRAG (Corrective RAG)*:: An architecture with a retrieval evaluator that grades
+the retrieved set and branches — refine, augment with web search, or discard.
+
+*Cross-encoder*:: A model that scores a `(query, document)` *pair* in one forward
+pass with full cross-attention. Precise, not precomputable, hence a second-stage
+reranker. See xref:RAG_Reranking.adoc[Reranking].
+
+== D
+
+*Corpus drift*:: Source documents changed while the index did not, so the system
+confidently cites superseded content. Detected by reconciliation, not by anything
+in the query path. See xref:RAG_Operations.adoc#_drift[Drift].
+
+*Dense retrieval*:: Vector/embedding search. Captures meaning; blind to rare
+exact tokens.
+
+*Docling*:: An open-source document parser that performs real layout analysis and
+emits a document *tree*, with a `HybridChunker` that chunks along it. See
+xref:RAG_Chunking.adoc#_docling[Docling].
+
+*doc_id*:: The per-document identifier every chunk must carry. Without it there is
+no delete, no versioning, no scoped search. See
+xref:RAG_Document_Management.adoc[Document Management].
+
+== E
+
+*Embedding*:: A vector representation of text such that similar text is nearby.
+See xref:RAG_Embeddings.adoc[Embeddings].
+
+*Entailment*:: Whether a passage logically supports a claim. Checked with an NLI
+model or an LLM judge; the step beyond
+xref:RAG_Citations.adoc#_quote_verification[quote verification].
+
+*`ef_search`*:: HNSW query-time search width. The only HNSW parameter tunable
+after the index is built, and the one to raise when recall is short.
+
+== F
+
+*Faithfulness*:: RAGAS metric: the fraction of an answer's atomic claims that can
+be inferred from the retrieved context. Low = hallucination.
+
+*Federated RAG*:: Searching several independent indexes and fusing the results.
+See xref:RAG_Architectures.adoc#_federated_and_multi_index_rag[Federated RAG].
+
+*Fine-tuning*:: Adapting model weights to a task. Changes *behaviour*; RAG changes
+*knowledge*. See xref:RAG_Overview.adoc#_rag_vs_fine_tuning_vs_long_context[the comparison].
+
+*Fusion*:: Combining multiple ranked lists into one. See *RRF*.
+
+== G
+
+*GraphRAG*:: Retrieval over an extracted entity/relationship graph, with
+community summaries enabling corpus-wide "what are the themes?" questions no
+top-k retriever can answer.
+
+*Ground truth*:: The reference answer in an eval case. Required by
+`context_recall` and `answer_correctness`.
+
+*Groundedness*:: TruLens's name for faithfulness — is the answer supported by the
+retrieved context?
+
+== H
+
+*Hallucination*:: A fluent, confident, unsupported claim. RAG reduces it by
+supplying facts; xref:RAG_Citations.adoc[citation verification] detects the
+residue.
+
+*Hierarchical RAG*:: Routing top-down through levels of summaries before
+searching chunks. See xref:RAG_Architectures.adoc#_hierarchical_rag[Hierarchical RAG].
+
+*Hit-rate@k*:: Did *any* relevant chunk make the top k? The recall ceiling for
+everything downstream.
+
+*HNSW*:: Hierarchical Navigable Small World — the most common ANN graph index.
+Best recall/latency, high memory.
+
+*Hybrid search*:: Dense + lexical retrieval, fused. See
+xref:RAG_Hybrid_Search.adoc[Hybrid Search].
+
+*HybridChunker*:: Docling's chunker: structural boundaries plus a tokenizer
+budget, with sibling merging.
+
+*HyDE*:: Hypothetical Document Embeddings — generate a hypothetical answer,
+embed *that*, retrieve with it. See xref:RAG_Techniques.adoc#_hyde[HyDE].
+
+== I
+
+*IDF (Inverse Document Frequency)*:: Weighting that makes rare terms count more.
+Why BM25 finds acronyms and product codes that embeddings blur.
+
+*Indirect prompt injection*:: Instructions planted in a *document* rather than
+typed by the user, which reach the model through retrieval. The signature RAG
+attack — the attacker never talks to your system. See
+xref:RAG_Security.adoc#_indirect_prompt_injection[Indirect prompt injection].
+
+*Idempotent ingestion*:: Re-ingesting an unchanged document costs nothing;
+re-ingesting a changed one replaces its chunks atomically. Keyed on a content
+hash. See xref:RAG_Document_Management.adoc#_idempotent_ingestion[Idempotent ingestion].
+
+*Indexing*:: The offline half of RAG: parse → chunk → embed → store.
+
+*IVF (Inverted File)*:: ANN index that clusters vectors into cells and searches
+the nearest `nprobe` cells.
+
+== L
+
+*Late chunking*:: Embed the whole document at token level *first*, then pool per
+chunk — so each chunk's vector carries document context. See
+xref:RAG_Techniques.adoc#_late_chunking[Late Chunking].
+
+*Late interaction*:: Scoring with per-token vectors via MaxSim, rather than one
+pooled vector. See *ColBERT*.
+
+*Lost in the middle*:: LLMs attend most strongly to the start and end of a long
+context; content in the middle is under-used. Motivates
+xref:RAG_Techniques.adoc#_contextual_compression[reordering].
+
+== M
+
+*MAP (Mean Average Precision)*:: Ranking metric averaging precision at each
+relevant hit.
+
+*Matryoshka embeddings*:: Trained so that a truncated *prefix* of the vector is
+still a valid embedding. 3072 → 512 dims for a small quality loss. See
+xref:RAG_Embeddings.adoc#_dimensions_and_matryoshka[Matryoshka].
+
+*MaxSim*:: ColBERT's scoring: for each query token take its best match among the
+document's token vectors, then sum.
+
+*MMR (Maximal Marginal Relevance)*:: Re-selection that trades a little relevance
+for diversity, preventing five near-identical chunks. See
+xref:RAG_Reranking.adoc#_diversity_mmr[MMR].
+
+*MRR (Mean Reciprocal Rank)*:: `1/rank` of the first relevant hit, averaged. The
+metric xref:RAG_Reranking.adoc[reranking] moves.
+
+*MTEB*:: Massive Text Embedding Benchmark. Use the *retrieval* sub-scores, and
+treat it as a shortlist generator rather than a verdict.
+
+*Multi-Query retrieval*:: Generate N paraphrases, retrieve for each, take the
+union. Without rank fusion, this is the weaker sibling of *RAG-Fusion*.
+
+*Multimodal RAG*:: Retrieval over images, charts, diagrams and tables as well as
+text. See xref:RAG_Multimodal.adoc[Multimodal RAG].
+
+*Modality gap*:: In a joint text-image embedding space, image vectors cluster
+with image vectors and text with text, so one cosine threshold does not serve
+both. Fusing per-modality rankings with RRF sidesteps it.
+
+== N
+
+*Naive RAG*:: The baseline: embed → top-k → stuff → generate.
+
+*nDCG@k*:: Normalised Discounted Cumulative Gain — graded relevance with a
+positional discount. The usual headline retrieval metric.
+
+*NLI (Natural Language Inference)*:: Entail / neutral / contradict classification.
+A cheap local way to check whether a chunk supports a claim.
+
+== P
+
+*Parent-Child retrieval*:: Index small chunks, return their large parents. Also
+"small-to-big". See xref:RAG_Techniques.adoc#_parent_child_retrieval[Parent-Child].
+
+*pgvector*:: Postgres extension for vector similarity. Under-rated: metadata
+filtering, ACLs, transactions and backups are already solved.
+
+*Permission drift*:: The index is a *copy* of your documents, so revocations and
+deletions at the source do not propagate automatically. See
+xref:RAG_Security.adoc#_permission_drift[Permission drift].
+
+*Pre-filter*:: Applying a metadata filter *before* the ANN search, so scoping
+makes retrieval cheaper. Contrast *post-filter*, which searches everything and
+discards — slower, and can return fewer results than requested.
+
+*Prompt caching*:: Reusing a cached prompt prefix across calls at reduced cost.
+What makes xref:RAG_Techniques.adoc#_contextual_retrieval[Contextual Retrieval]
+affordable.
+
+== Q
+
+*Quantisation*:: Reducing vector precision — float32 → int8 → binary — for memory
+and speed. See xref:RAG_Embeddings.adoc#_quantisation[Quantisation].
+
+*Query contextualisation*:: Rewriting a follow-up into a standalone question using
+conversation history. See xref:RAG_Conversational_Memory.adoc[Conversational Memory].
+
+*Query expansion*:: Generating additional query formulations to broaden retrieval.
+
+== R
+
+*RAG*:: Retrieval-Augmented Generation — retrieve relevant text, put it in the
+prompt, generate from it.
+
+*RAG-Fusion*:: Multi-query generation merged with RRF, so consensus across
+phrasings wins. See xref:RAG_Techniques.adoc#_rag_fusion[RAG-Fusion].
+
+*RAGAS*:: The standard open-source RAG evaluation framework, built around
+reference-free LLM-judged metrics. See xref:RAG_Evaluation.adoc#_what_is_ragas[What is RAGAS].
+
+*RAPTOR*:: Recursive Abstractive Processing for Tree-Organized Retrieval —
+bottom-up clustering and summarisation, searched as one flat collapsed index.
+
+*ReAct*:: The interleaved reason/act loop underlying most agentic implementations.
+
+*Recall@k*:: Fraction of relevant items found in the top k. See *hit-rate@k*.
+
+*Reranking*:: Reordering retrieved candidates with a more expensive, more
+accurate model. See xref:RAG_Reranking.adoc[Reranking].
+
+*Reconciliation*:: A scheduled diff of `(doc_id, content_hash)` between the
+source of truth and the index, reporting what is missing, stale or orphaned.
+The cheapest defence against silent staleness.
+
+*Retrieve-and-rerank*:: The two-stage architecture: cheap high-recall retrieval,
+then expensive high-precision ranking.
+
+*RRF (Reciprocal Rank Fusion)*:: `score(d) = Σ 1/(κ + rank(d))` over ranked lists.
+Rank-based, so no score normalisation is needed. `κ = 60` by convention.
+
+*RRR (Rewrite-Retrieve-Read)*:: Insert a query rewriter before retrieval,
+optionally trained by RL against downstream answer quality. See
+xref:RAG_Techniques.adoc#_rrr_rewrite_retrieve_read[RRR].
+
+== S
+
+*Shadow evaluation*:: Running a candidate retriever on live traffic alongside
+the current one and comparing rankings offline, without showing users the
+candidate. See xref:RAG_Operations.adoc#_migrations[Migrations].
+
+*Self-Query*:: Having the LLM split a query into a semantic part and a structured
+metadata filter. See xref:RAG_Techniques.adoc#_self_query_retrieval[Self-Query].
+
+*Self-RAG*:: A model trained to emit *reflection tokens* deciding whether to
+retrieve and critiquing its own grounding.
+
+*Semantic chunking*:: Cutting where consecutive sentence embeddings diverge.
+
+*Sentence-window retrieval*:: Embed one sentence, return it with *n* neighbours.
+
+*Small-to-big*:: See *Parent-Child retrieval*.
+
+*Embedding inversion*:: Recovering substantial source text from its embedding.
+The reason a vector store should carry the same data classification as the
+documents it was built from, not a lesser one.
+
+*Semantic query cache*:: Returning a stored answer when a new query embeds
+close enough to a previous one. 20-40% hit rates are common on real traffic;
+needs invalidation on re-index.
+
+*Sparse retrieval*:: Lexical/term-based retrieval over an inverted index (BM25),
+or learned sparse (SPLADE).
+
+*SPLADE*:: Learned sparse retrieval — a transformer produces a sparse vocabulary
+vector, expanding documents with related terms while keeping exact-match
+behaviour and an inverted index.
+
+*Step-back prompting*:: Retrieve background by asking the more general question
+first, then answer the specific one.
+
+*Structural chunking*:: Splitting on the document's own hierarchy — headings,
+tables, list items — rather than on inferred boundaries.
+
+== T
+
+*Trust tier*:: A per-source trust level on chunks, so user-generated content
+cannot outrank curated documentation. The cheapest structural defence against
+corpus poisoning.
+
+*Text-proxy indexing*:: The multimodal strategy of having a VLM describe each
+figure, embedding the *description* with a normal text model, and passing the
+*image* to the generator. See xref:RAG_Multimodal.adoc#_strategy_text_proxy_indexing[Text-proxy indexing].
+
+*Text-to-SQL*:: Generating SQL from a natural-language question, used as a
+retrieval backend for aggregate queries. See
+xref:RAG_Architectures.adoc#_structured_sql_rag[Structured RAG].
+
+*TF-IDF*:: Term frequency × inverse document frequency. BM25's ancestor.
+
+*Tokenizer budget*:: Sizing chunks in *tokens* rather than characters, so they
+actually fit the embedding model's window.
+
+*Trace*:: The per-answer record of retrieved ids at each stage, timings, claims
+and component versions. What makes "why did it say that?" answerable without
+re-running anything. See xref:RAG_Operations.adoc#_tracing_one_bad_answer[Tracing].
+
+*Top-k*:: The number of chunks retrieved. Has no notion of "nothing else
+qualifies" — restore one with a score threshold.
+
+*Two-stage retrieval*:: See *retrieve-and-rerank*.
+
+== V
+
+*VLM (Vision-Language Model)*:: A model that accepts images alongside text.
+Used in xref:RAG_Multimodal.adoc[multimodal RAG] to describe figures at index
+time and to answer from them at generation time.
+
+*Vector store*:: A database for embeddings with ANN search and metadata
+filtering. See xref:RAG_Embeddings.adoc#_vector_stores[Vector stores].
+
+*Verbatim quote*:: An exact span copied from a source chunk, used to verify a
+citation mechanically. See xref:RAG_Citations.adoc#_quote_verification[Quote verification].
+
+*Versioning*:: Keeping prior document versions retrievable so old citations still
+resolve. See xref:RAG_Document_Management.adoc#_versioning[Versioning].

@@ -1,0 +1,472 @@
+= RAG Architectures and Types
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+xref:RAG_Techniques.adoc[Techniques] are things you add to a pipeline.
+*Architectures* are the shape of the pipeline itself — what the control flow
+looks like and who decides it. This document covers the recognised families and
+how to pick one.
+
+== The Three Paradigms
+
+link:https://arxiv.org/abs/2312.10997[Gao et al., "Retrieval-Augmented Generation for Large Language Models: A Survey"]
+introduced the naming that most of the field now uses.
+
+[mermaid]
+....
+flowchart TB
+    subgraph NAIVE["① Naive RAG — a straight line"]
+        direction LR
+        N1[Query] --> N2[Retrieve] --> N3[Generate] --> N4[Answer]
+    end
+
+    subgraph ADV["② Advanced RAG — a line with stages"]
+        direction LR
+        A1[Query] --> A2[Pre-retrieval<br/>rewrite, expand] --> A3[Retrieve<br/>hybrid]
+        A3 --> A4[Post-retrieval<br/>rerank, compress] --> A5[Generate] --> A6[Answer]
+    end
+
+    subgraph MOD["③ Modular RAG — a graph"]
+        direction LR
+        M1[Query] --> M2{Router}
+        M2 --> M3[Vector search]
+        M2 --> M4[SQL / API]
+        M2 --> M5[Graph traversal]
+        M2 --> M6[No retrieval]
+        M3 & M4 & M5 & M6 --> M7[Fuse]
+        M7 --> M8[Generate]
+        M8 --> M9{Good<br/>enough?}
+        M9 -->|no| M2
+        M9 -->|yes| M10[Answer]
+    end
+
+    style NAIVE fill:#fce8e6,stroke:#ea4335
+    style ADV fill:#fef7e0,stroke:#fbbc04
+    style MOD fill:#e6f4ea,stroke:#34a853
+....
+
+[cols="1,2,2,2", options="header"]
+|===
+|
+|Naive
+|Advanced
+|Modular
+
+|Control flow
+|Fixed, linear
+|Fixed, staged
+|Dynamic, may loop
+
+|Retrieval count
+|Exactly 1
+|Exactly 1 (possibly multi-query)
+|0..N, decided at runtime
+
+|Failure mode
+|Answers from noise
+|Answers from good context or admits gaps
+|Can loop, can be slow, can cost a lot
+
+|Latency
+|Predictable, low
+|Predictable, moderate
+|Unpredictable
+
+|Build when
+|Prototyping
+|Production default
+|Multi-hop, multi-source, or comparison questions
+|===
+
+Most production systems should be *Advanced*. Modular/agentic is a genuine
+requirement for some question types and a very expensive way to answer
+"what is our refund window?" for the rest — which is why hybrid designs that
+route simple queries down the fixed path are increasingly common.
+
+== Hierarchical RAG
+
+*Problem:* a flat index treats 50,000 chunks as one undifferentiated pool. Two
+things break at that scale. *Dilution* — with enough near-duplicate chunks
+("check the dashboard" appears in every runbook), top-k fills with
+plausible-but-wrong neighbours from documents that were never relevant.
+*Aboutness* — "which system owns settlement?" is a question about a *document*,
+not about any sentence in it, so no chunk contains the answer.
+
+*Architecture:* build a tree of summaries and search it top-down.
+
+[mermaid]
+....
+flowchart TB
+    Q([Query: 'who owns settlement<br/>and how are errors fixed?'])
+
+    Q --> L2
+
+    subgraph L2["Level 2 — collection summaries"]
+        C1["Payments docs"]
+        C2["HR docs"]
+        C3["Legal docs"]
+    end
+
+    C1 ==>|"0.71 ✓"| L1
+    C2 -->|0.12| X1[pruned]
+    C3 -->|0.09| X2[pruned]
+
+    subgraph L1["Level 1 — document summaries"]
+        D1["Payments Architecture<br/>'ledger, idempotency,<br/>settlement'"]
+        D2["Refund Policy<br/>'14-day window,<br/>payback method'"]
+        D3["Payments Runbook<br/>'rollback, incidents'"]
+    end
+
+    D1 ==>|"0.68 ✓"| L0
+    D2 -->|0.21| X3[pruned]
+    D3 -->|0.18| X4[pruned]
+
+    subgraph L0["Level 0 — chunks"]
+        P1["'settlement is owned by<br/>the treasury team...'"]
+        P2["'the ledger is append-only;<br/>corrections are<br/>compensating entries'"]
+    end
+
+    L0 --> A([Answer with both chunks])
+
+    style L2 fill:#e8f0fe,stroke:#4285f4
+    style L1 fill:#fef7e0,stroke:#fbbc04
+    style L0 fill:#e6f4ea,stroke:#34a853
+....
+
+The chunk search now runs over hundreds of candidates instead of tens of
+thousands, so precision rises and latency falls at the same time.
+
+*The critical parameter is beam width.* Width 1 is fastest, but a routing mistake
+at level 1 is unrecoverable — the correct chunk is never even scored. Width 2-3
+is the usual compromise; measure it with recall@k rather than guessing.
+
+*Cost:* one LLM call per document at ingest to write the summary (cached,
+regenerated only on content-hash change), plus one extra vector search per level
+at query time.
+
+📄 xref:examples/hierarchical_rag.py[`examples/hierarchical_rag.py`] ·
+🔗 link:https://github.com/pheonix-delta/WiredBrain-Hierarchical-Rag[WiredBrain-Hierarchical-Rag]
+
+=== RAPTOR
+
+link:https://arxiv.org/abs/2401.18059[Sarthi et al., 2024] — hierarchical RAG
+built *bottom-up* and searched *flat*.
+
+[mermaid]
+....
+flowchart TB
+    subgraph BUILD["Build: recursive cluster + summarise"]
+        direction TB
+        B0["chunks (leaves)"] --> B1["cluster by embedding<br/>(GMM + UMAP)"]
+        B1 --> B2["LLM-summarise<br/>each cluster"]
+        B2 --> B3["treat summaries<br/>as new nodes"]
+        B3 -->|repeat| B1
+    end
+
+    subgraph SEARCH["Search: collapsed tree"]
+        direction TB
+        S1["index ALL nodes<br/>at every level together"]
+        S1 --> S2["one flat search"]
+        S2 --> S3["abstract question<br/>→ hits a summary node"]
+        S2 --> S4["specific question<br/>→ hits a leaf"]
+    end
+
+    BUILD --> SEARCH
+
+    style BUILD fill:#e8f0fe,stroke:#4285f4
+    style SEARCH fill:#e6f4ea,stroke:#34a853
+....
+
+The difference from classic hierarchical RAG: RAPTOR does not route top-down. It
+puts every node from every level into one index and lets the query decide its own
+altitude. That elegantly handles the mixed corpus where some questions are
+"summarise the themes" and others are "what is the timeout value".
+
+*Cost:* the build is expensive (clustering plus an LLM summary per cluster per
+level) and must be redone when a meaningful fraction of the corpus changes.
+
+🔗 link:https://github.com/parthsarthi03/raptor[parthsarthi03/raptor]
+
+== Agentic RAG
+
+*Problem:* every architecture above is a fixed graph, which is optimal for a
+single-hop factual question and wrong for everything else. "Hi" triggers a
+pointless retrieval. "Compare our refund window to our idempotency window" needs
+two retrievals over different topics and then a synthesis. A failed retrieval
+gets answered from noise instead of retried with different terms.
+
+*Architecture:* make retrieval a *tool* rather than a stage. The model plans,
+calls the tool with its own query, inspects the result, and decides what to do
+next.
+
+[mermaid]
+....
+flowchart TB
+    Q([User question]) --> AG[Agent<br/>LLM with tools]
+
+    AG --> DEC{Need to<br/>retrieve?}
+    DEC -->|no| ANS([Answer directly])
+    DEC -->|yes| PLAN[Choose tool<br/>+ write query]
+
+    PLAN --> T1[search_docs]
+    PLAN --> T2[search_web]
+    PLAN --> T3[query_sql]
+    PLAN --> T4[call_api]
+
+    T1 & T2 & T3 & T4 --> GRADE{Results<br/>relevant?}
+    GRADE -->|no, retry budget left| PLAN
+    GRADE -->|no, budget spent| IDK([Say 'not found'])
+    GRADE -->|yes| MORE{More<br/>sub-questions?}
+    MORE -->|yes| PLAN
+    MORE -->|no| SYN[Synthesise<br/>+ cite]
+    SYN --> ANS
+
+    style AG fill:#f3e8fd,stroke:#a142f4
+    style GRADE fill:#fef7e0,stroke:#fbbc04
+    style IDK fill:#fce8e6,stroke:#ea4335
+....
+
+*The four building blocks:*
+
+[cols="1,3", options="header"]
+|===
+|Block |What it does
+
+|*Tool use*
+|Retrieval has a schema and is called with arguments the model chose. The model can decline to call it.
+
+|*Routing*
+|One tool per corpus or per backend. The model picks — or picks none.
+
+|*Self-grading*
+|CRAG's insight: check the retrieved documents before using them. A bad grade triggers a different query, not a confident hallucination.
+
+|*Bounded looping*
+|`max_steps`. Without it, a model that cannot find something will rephrase forever.
+|===
+
+*Multi-agent variants* push this further: a planner decomposes, specialist
+retrieval agents own one corpus each and run in parallel, a synthesiser merges.
+Better for genuinely heterogeneous sources; considerably harder to debug and to
+predict the cost of.
+
+[mermaid]
+....
+flowchart LR
+    Q([Complex question]) --> P[Planner agent<br/>decompose]
+    P --> A1[Docs agent]
+    P --> A2[SQL agent]
+    P --> A3[Web agent]
+    A1 & A2 & A3 --> S[Synthesiser agent<br/>merge + resolve conflicts]
+    S --> C[Critic agent<br/>check grounding]
+    C -->|reject| P
+    C -->|accept| ANS([Answer])
+
+    style P fill:#e8f0fe,stroke:#4285f4
+    style C fill:#fce8e6,stroke:#ea4335
+....
+
+*Cost:* unpredictable by construction — 1 to `max_steps` LLM calls plus tool
+latency. Budget it explicitly, log every step, and route simple queries around it.
+
+📄 xref:examples/agentic_rag.py[`examples/agentic_rag.py`]
+
+== Graph RAG
+
+*Problem:* vector search finds passages that are *similar* to the query. It
+cannot answer questions that require *traversal* — "who reports to the person who
+approved this change?", "what are the recurring themes across all incident
+reports?" No single chunk contains a global theme, and similarity does not
+follow relationships.
+
+*Architecture:* extract an entity/relationship graph at ingest, then retrieve
+over the graph.
+
+[mermaid]
+....
+flowchart TB
+    subgraph ING["Ingest"]
+        direction TB
+        I1[Chunks] --> I2[LLM: extract<br/>entities + relations]
+        I2 --> I3[(Knowledge graph)]
+        I3 --> I4[Community detection<br/>Leiden clustering]
+        I4 --> I5[LLM: summarise<br/>each community]
+        I5 --> I6[(Community summaries)]
+    end
+
+    subgraph LOCAL["Local search — entity-centric"]
+        direction TB
+        L1[Query mentions<br/>an entity] --> L2[Find entity node]
+        L2 --> L3[Walk N hops]
+        L3 --> L4[Gather connected<br/>chunks + relations]
+    end
+
+    subgraph GLOBAL["Global search — corpus-wide"]
+        direction TB
+        G1["Query: 'what are the<br/>main themes?'"] --> G2[Map over ALL<br/>community summaries]
+        G2 --> G3[Reduce into<br/>one answer]
+    end
+
+    ING --> LOCAL
+    ING --> GLOBAL
+
+    style ING fill:#e8f0fe,stroke:#4285f4
+    style LOCAL fill:#e6f4ea,stroke:#34a853
+    style GLOBAL fill:#f3e8fd,stroke:#a142f4
+....
+
+link:https://github.com/microsoft/graphrag[Microsoft GraphRAG] is the reference
+implementation, and its *global search* is the genuinely novel part — a
+map-reduce over community summaries answers "what are the themes?", which no
+top-k retriever can do at all.
+
+*Cost:* the highest of any architecture here. Entity extraction is an LLM call
+per chunk, community summarisation is more, and the graph must be maintained as
+documents change. Justify it with a question type that actually requires
+traversal, not with a diagram.
+
+*Lighter alternatives:* link:https://github.com/HKUDS/LightRAG[LightRAG],
+link:https://neo4j.com/labs/genai-ecosystem/[Neo4j GraphRAG], or simply adding
+explicit `related_to` metadata links between chunks and expanding one hop after
+retrieval.
+
+== Multimodal RAG
+
+*Problem:* the answer is in a chart, a screenshot, a diagram, or a scanned table —
+and text extraction turns it into soup.
+
+Three strategies, in increasing order of how much of your pipeline they replace:
+
+[cols="1,3", options="header"]
+|===
+|Strategy |Summary
+
+|*Text-proxy indexing*
+|A VLM describes each figure; you embed the description with your normal text model and keep the image for generation. Drops into an existing pipeline unchanged — start here.
+
+|*Unified embedding*
+|Images and text in one shared space (CLIP, SigLIP, `voyage-multimodal`). Good for photo libraries, weak for documents.
+
+|*Visual document retrieval*
+|link:https://github.com/illuin-tech/colpali[ColPali] embeds *page images* with ColBERT-style late interaction, skipping parsing, chunking and OCR entirely. Highest quality on scans and dense reports; ~100x the storage and a GPU.
+|===
+
+📖 Full treatment — including tables and charts specifically, citation handling
+for visual sources, and how to choose between ColPali and a good parser — in
+xref:RAG_Multimodal.adoc[Multimodal RAG].
+📄 xref:examples/multimodal_rag.py[`examples/multimodal_rag.py`]
+
+== Structured / SQL RAG
+
+*Problem:* "what was our refund rate last quarter?" is not in any document. It is
+a `GROUP BY` over a table. Semantic search over row text is a bad way to compute
+an aggregate.
+
+*Architecture:* text-to-SQL as a retrieval backend, usually as one tool among
+several in an agentic setup.
+
+[mermaid]
+....
+flowchart LR
+    Q[Question] --> R{Router}
+    R -->|"factual /<br/>policy"| V[Vector search]
+    R -->|"aggregate /<br/>metric"| S[Text-to-SQL]
+    R -->|"both"| B[Both, then join]
+    S --> SC[Schema + few-shot<br/>+ sample rows]
+    SC --> GEN[LLM writes SQL]
+    GEN --> VAL{Validate:<br/>read-only? parses?<br/>row limit?}
+    VAL -->|fail| GEN
+    VAL -->|pass| EX[Execute]
+    EX --> F[Format result]
+    V --> A[Generate answer]
+    F --> A
+    B --> A
+
+    style VAL fill:#fce8e6,stroke:#ea4335
+....
+
+*The validation gate is not optional.* Enforce a read-only connection, a
+statement allowlist, a `LIMIT`, and a timeout at the *database* level — never
+rely on the prompt to keep generated SQL safe. Full control list in
+xref:RAG_Security.adoc#_generated_sql_and_tool_use[RAG Security].
+
+== Federated and Multi-Index RAG
+
+Several independent indexes — per team, per tenant, per data source — searched
+together, with results fused. Distinct from hybrid search (different retrievers
+over one corpus) and RAG-Fusion (different queries over one retriever).
+
+[mermaid]
+....
+flowchart LR
+    Q[Query] --> R{Router:<br/>which indexes?}
+    R --> I1[(Confluence)]
+    R --> I2[(Jira)]
+    R --> I3[(Code)]
+    R --> I4[(Slack)]
+    I1 & I2 & I3 & I4 --> ACL[Filter by<br/>caller's permissions]
+    ACL --> F{{RRF merge}}
+    F --> RR[Rerank across<br/>all sources]
+    RR --> G[Generate]
+
+    style ACL fill:#fce8e6,stroke:#ea4335
+....
+
+Two things go wrong here specifically. *Score incomparability* — each index has
+its own score distribution, so use RRF or a single cross-encoder pass over the
+merged set, never raw score addition. *Permission leakage* — filter by ACL
+*before* the results reach the model, and prefer a pre-filter in the query rather
+than a post-filter you might forget on one code path. See
+xref:RAG_Document_Management.adoc#_multi_tenancy_and_access_control[Multi-tenancy and access control].
+
+== Edge / On-Device RAG
+
+Everything runs locally: a quantised embedding model, a local vector index
+(sqlite-vec, FAISS, LanceDB) and a small local LLM. Chosen for privacy,
+offline operation or per-query cost, at the price of accuracy.
+
+Practical stack: `bge-small` or `all-MiniLM-L6-v2` for embeddings (~30-90 MB),
+binary or int8 quantised vectors (see
+xref:RAG_Embeddings.adoc#_quantisation[quantisation]), sqlite-vec or LanceDB
+for storage, and a 3-8B instruct model via llama.cpp or Ollama. Reranking with
+a MiniLM cross-encoder is still affordable and still the best accuracy per
+megabyte.
+
+== Choosing an Architecture
+
+[mermaid]
+....
+flowchart TB
+    S([What do your questions look like?]) --> Q1{Single-hop factual,<br/>one corpus?}
+    Q1 -->|yes| A1[Advanced RAG<br/>hybrid + rerank]
+
+    Q1 -->|no| Q2{Multi-hop, comparison,<br/>or needs several sources?}
+    Q2 -->|yes| A2[Agentic RAG]
+
+    Q2 -->|no| Q3{'What are the themes<br/>across everything?'<br/>or relationship traversal?}
+    Q3 -->|yes| A3[Graph RAG]
+
+    Q3 -->|no| Q4{Corpus > ~50k chunks<br/>with clear document<br/>boundaries?}
+    Q4 -->|yes| A4[Hierarchical RAG<br/>or RAPTOR]
+
+    Q4 -->|no| Q5{Answers live in charts,<br/>scans, screenshots?}
+    Q5 -->|yes| A5[Multimodal RAG<br/>ColPali or VLM captions]
+
+    Q5 -->|no| Q6{Aggregates over<br/>tabular data?}
+    Q6 -->|yes| A6[Structured / SQL RAG]
+    Q6 -->|no| A1
+
+    style A1 fill:#e6f4ea,stroke:#34a853
+    style A2 fill:#f3e8fd,stroke:#a142f4
+    style A3 fill:#e8f0fe,stroke:#4285f4
+....
+
+These combine. A realistic large system is *hierarchical routing* into
+*hybrid retrieval with reranking*, wrapped in an *agent* that can also hit a
+*SQL* tool — with the agent bypassed entirely for queries a classifier marks as
+simple. Build the middle first.
