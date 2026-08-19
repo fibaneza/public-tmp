@@ -26,7 +26,7 @@ Logging, tracing, cost attribution and alerting for LLM services.
 |LiteLLM `CustomLogger` capturing cost, tokens (input / output / cache-read / cache-write), model and timings.
 
 |xref:examples/sessions.py[`sessions.py`]
-|DynamoDB session store: created by FastAPI, id shared with LiteLLM as call metadata.
+|Aurora Serverless v2 (PostgreSQL) session store and per-call usage ledger, created by FastAPI, id shared with LiteLLM as call metadata. Covers RDS Proxy pooling, IAM auth and the missing-TTL problem.
 
 |xref:examples/app.py[`app.py`]
 |FastAPI app — correlation middleware, structured JSON logging, chat and streaming endpoints with TTFT.

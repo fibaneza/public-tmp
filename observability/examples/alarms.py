@@ -10,8 +10,19 @@ Two distinct mechanisms, and the split matters:
   cardinality, run on demand, cost per GB scanned. Use for: per-user cost,
   per-session forensics, "who spent the most yesterday".
 
-Per-user budget enforcement needs both: a scheduled query to compute spend, and
-an alarm on a metric the query's Lambda publishes.
+Per-user budget enforcement needs both: a scheduled job to compute spend, and
+an alarm on a metric that job publishes.
+
+On this stack there are two sources for the spend figure, and they answer
+different questions:
+
+  * the `llm_usage` table in Aurora — exact, transactional, joinable to your
+    own user and tenant tables. Use it for billing and for enforcement.
+  * Logs Insights over the EMF records — approximate but co-located with the
+    full request context. Use it for forensics when a number looks wrong.
+
+`USERS_OVER_BUDGET` in sessions.py is the SQL form; the Logs Insights form
+below is the cross-check.
 
     python alarms.py create     # provision alarms
     python alarms.py queries    # print the Logs Insights queries

@@ -25,10 +25,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from contextlib import asynccontextmanager
+
 from context import RequestContext, get_context, new_ids, require_context, set_context
 from emf import emit
 from litellm_callback import LLMTelemetryHandler
-from sessions import SessionStore
+from sessions import SessionStore, create_pool
 
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev")
 DEFAULT_MODEL = os.environ.get("LLM_MODEL", "claude-opus-5")
@@ -39,8 +41,29 @@ log = logging.getLogger("app")
 litellm.callbacks = [LLMTelemetryHandler(environment=ENVIRONMENT)]
 litellm.drop_params = True          # tolerate provider-specific params when routing
 
-app = FastAPI(title="LLM Gateway")
-sessions = SessionStore()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Own the connection pool for the process lifetime.
+
+    Creating a pool per request would exhaust Aurora's connection limit almost
+    immediately — max_connections scales with ACUs, and ECS multiplies by task
+    count. One small pool per task, created once, is the whole discipline.
+    """
+    app.state.pool = await create_pool()
+    app.state.sessions = SessionStore(app.state.pool)
+    try:
+        yield
+    finally:
+        # Let in-flight queries finish before the task goes away; ECS
+        # stopTimeout must exceed this or closing gracefully is pointless.
+        await app.state.pool.close()
+
+
+app = FastAPI(title="LLM Gateway", lifespan=lifespan)
+
+
+def store(request: Request) -> SessionStore:
+    return request.app.state.sessions
 
 
 # ---------------------------------------------------------------------------
@@ -141,12 +164,13 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/chat")
-async def chat(body: ChatRequest, user: dict = Depends(current_user)):
+async def chat(body: ChatRequest, request: Request, user: dict = Depends(current_user)):
     ctx = require_context()
     ctx.user_id = user["user_id"]
     ctx.tenant_id = user["tenant_id"]
 
-    session = sessions.get_or_create(body.session_id, ctx.user_id, ctx.tenant_id)
+    sessions = store(request)
+    session = await sessions.get_or_create(body.session_id, ctx.user_id, ctx.tenant_id)
     ctx.session_id = session.session_id
     set_context(ctx)
 
@@ -170,11 +194,31 @@ async def chat(body: ChatRequest, user: dict = Depends(current_user)):
 
     text = response.choices[0].message.content
     cost = float(getattr(response, "_hidden_params", {}).get("response_cost") or 0.0)
-    tokens = int(getattr(response.usage, "total_tokens", 0) or 0)
+    usage = response.usage
+    tokens = int(getattr(usage, "total_tokens", 0) or 0)
+    total_ms = (time.perf_counter() - started) * 1000
 
-    sessions.append_turn(session, body.message, text, cost_usd=cost, tokens=tokens)
-    jlog("chat.completed",
-         duration_ms=round((time.perf_counter() - started) * 1000, 1),
+    # The session update and the usage-ledger row commit in ONE transaction.
+    # On a key-value store these are two independent writes, and a crash
+    # between them leaves the ledger and the session disagreeing about what
+    # the user was charged for.
+    session = await sessions.append_turn(
+        session, body.message, text,
+        cost_micro_usd=round(cost * 1_000_000), tokens=tokens,
+        usage={
+            "request_id": ctx.request_id,
+            "model": body.model or DEFAULT_MODEL,
+            "status": "success",
+            "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "cache_read_tokens": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            "cache_write_tokens": int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+            "model_latency_ms": None,     # authoritative value comes from the callback
+            "total_latency_ms": round(total_ms, 2),
+        },
+    )
+
+    jlog("chat.completed", duration_ms=round(total_ms, 1),
          cost_usd=cost, tokens=tokens, session_cost_usd=session.cost_usd)
 
     return {"reply": text, "session_id": session.session_id,
@@ -182,7 +226,8 @@ async def chat(body: ChatRequest, user: dict = Depends(current_user)):
 
 
 @app.post("/chat/stream")
-async def chat_stream(body: ChatRequest, user: dict = Depends(current_user)):
+async def chat_stream(body: ChatRequest, request: Request,
+                      user: dict = Depends(current_user)):
     """Streaming path — the only one where TTFT is measurable.
 
     LiteLLM records its own first-token timestamp for the callback; this
@@ -192,7 +237,8 @@ async def chat_stream(body: ChatRequest, user: dict = Depends(current_user)):
     """
     ctx = require_context()
     ctx.user_id = user["user_id"]
-    session = sessions.get_or_create(body.session_id, ctx.user_id, user["tenant_id"])
+    sessions = store(request)
+    session = await sessions.get_or_create(body.session_id, ctx.user_id, user["tenant_id"])
     ctx.session_id = session.session_id
     set_context(ctx)
 
@@ -223,14 +269,24 @@ async def chat_stream(body: ChatRequest, user: dict = Depends(current_user)):
             chunks.append(delta)
             yield f"data: {json.dumps({'delta': delta})}\n\n"
 
-        sessions.append_turn(session, body.message, "".join(chunks))
+        await sessions.append_turn(session, body.message, "".join(chunks))
         yield f"data: {json.dumps({'done': True, 'session_id': session.session_id})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/healthz")
-async def healthz():
+async def healthz(request: Request):
     """Kept free of LLM calls — an ECS health check that costs money per probe
-    is a real and surprisingly common way to burn budget."""
-    return {"ok": True, "environment": ENVIRONMENT}
+    is a real and surprisingly common way to burn budget.
+
+    It does check the database, because a task that cannot reach Aurora should
+    be replaced rather than left serving 500s. `SELECT 1` is cheap enough to run
+    every 30s and is a genuine liveness signal for the pool.
+    """
+    try:
+        await request.app.state.pool.fetchval("SELECT 1")
+        db_ok = True
+    except Exception:
+        db_ok = False
+    return {"ok": db_ok, "db": db_ok, "environment": ENVIRONMENT}
