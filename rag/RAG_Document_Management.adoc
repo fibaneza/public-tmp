@@ -1,0 +1,304 @@
+= Document Management: Metadata, CRUD and Multi-Tenancy
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Most RAG tutorials stop at "ingest a folder". Then someone asks you to delete a
+document and you discover the index has no notion of documents at all — only
+loose vectors.
+
+The fixes are structural, cheap on day one, and expensive later: retrofitting
+`doc_id` onto an existing index means a full re-ingest.
+
+📄 xref:examples/document_manager.py[`examples/document_manager.py`]
+
+== The Data Model
+
+[mermaid]
+....
+erDiagram
+    DOCUMENT ||--o{ CHUNK : "split into"
+    DOCUMENT {
+        string doc_id PK
+        string title
+        string source_uri
+        string content_hash
+        string version
+        string tags
+        string acl
+        timestamp ingested_at
+    }
+    CHUNK {
+        string id PK "doc_id::page::index"
+        string doc_id FK
+        string text "VERBATIM — for citation"
+        string embed_text "breadcrumb + context — for search"
+        int page
+        int chunk_index
+        int chunk_count
+        string parent_id
+        vector embedding
+    }
+    CHUNK ||--o| PARENT : "expands to"
+....
+
+Every chunk carries its `doc_id`. That one field turns "delete this document"
+from a full scan into a filtered delete, and makes per-document search scoping,
+versioning and ACLs possible.
+
+== Idempotent Ingestion
+
+Re-ingesting an unchanged file must cost nothing. Re-ingesting a *changed* file
+must replace the old chunks atomically.
+
+[mermaid]
+....
+flowchart TB
+    F[File] --> H[content_hash = sha256]
+    H --> Q{Existing doc<br/>with this doc_id?}
+    Q -->|no| C[CREATE: parse → chunk → embed → add]
+    Q -->|yes| M{hash matches?}
+    M -->|yes| N["UNCHANGED — return, cost 0"]
+    M -->|no| U["UPDATE:<br/>delete WHERE doc_id = X<br/>then add new chunks"]
+
+    U -.->|"⚠️ NOT 'overwrite chunk 0..n' —<br/>chunk counts change between<br/>versions, leaving orphans<br/>from n+1 that still answer queries"| W[ ]
+
+    style N fill:#e6f4ea,stroke:#34a853
+    style W fill:#fce8e6,stroke:#ea4335
+....
+
+[source,python]
+----
+def upsert(self, doc, chunks, pages):
+    digest = sha256(doc.text.encode()).hexdigest()[:16]
+    existing = self.collection.get(where={"doc_id": doc.doc_id}, limit=1,
+                                   include=["metadatas"])
+    metas = existing.get("metadatas") or []
+    if metas and metas[0].get("content_hash") == digest:
+        return "unchanged"                      # no parse, no embed, no write
+    if metas:
+        self.delete(doc.doc_id)                 # full replace, never partial
+    self.collection.add(ids=[...], documents=chunks, metadatas=[...])
+    return "updated" if metas else "created"
+----
+
+The delete-then-add is the part people get wrong. Writing chunks `0..n` over the
+old ones leaves orphans from `n+1` onward that keep answering queries with
+deleted content — a bug that shows up weeks later as "why is it quoting the old
+policy?"
+
+== CRUD
+
+[cols="1,2,3", options="header"]
+|===
+|Operation |Implementation |Notes
+
+|*Create*
+|`add(ids, documents, metadatas)`
+|Batch. Ids should be deterministic: `doc_id::page::index`
+
+|*Read (list)*
+|`get(include=["metadatas"])` then group by `doc_id`
+|Vector DBs have no `GROUP BY`; aggregate client-side, or keep a separate documents table
+
+|*Read (chunks)*
+|`get(where={"doc_id": X})`
+|Sort by `chunk_index` to reconstruct reading order
+
+|*Read (search)*
+|`query(query_texts, where=...)`
+|Filters are a *pre*-filter — scoping makes search cheaper, not more expensive
+
+|*Update*
+|delete by `doc_id` then add
+|Atomic replace. Never partial overwrite
+
+|*Delete*
+|`delete(where={"doc_id": X})`
+|Hard delete. Soft delete needs `{"deleted": false}` on *every* query filter — easy to forget on one code path
+|===
+
+*Keep a document registry outside the vector store.* A small relational table
+(`doc_id`, title, uri, hash, version, ingested_at, chunk_count, status) makes
+listing, pagination, sorting and admin UIs trivial, and gives you a place to
+record failed ingests. Vector stores are optimised for similarity search, not for
+being an application database.
+
+== Filtered Search
+
+[mermaid]
+....
+flowchart LR
+    Q[Query] --> F{Pre-filter<br/>metadata}
+    F -->|"doc_id IN (a,b)<br/>AND acl @> caller_groups<br/>AND version = 'current'"| SUB["Candidate subset<br/>~2k vectors"]
+    SUB --> ANN[ANN search] --> R[Results]
+
+    X["❌ Post-filtering instead:<br/>search all → filter after<br/>→ top-k may be entirely<br/>filtered out, returning<br/>fewer results than asked"] -.-> R
+
+    style F fill:#e6f4ea,stroke:#34a853
+    style X fill:#fce8e6,stroke:#ea4335
+....
+
+*Pre-filter, always.* Post-filtering searches the whole corpus and then discards —
+which is slower *and* can return three results when you asked for ten, because
+seven of the top ten were filtered out. Qdrant, Weaviate, Milvus and pgvector all
+support genuine pre-filtering; check that your store does before relying on it.
+
+[source,python]
+----
+results = collection.query(
+    query_texts=[query],
+    n_results=10,
+    where={"$and": [
+        {"doc_id": {"$in": allowed_doc_ids}},
+        {"version": "current"},
+    ]},
+)
+----
+
+== Versioning
+
+Two models, and the choice depends on whether old answers must stay reproducible.
+
+[cols="1,2,2", options="header"]
+|===
+|
+|Replace
+|Version
+
+|Storage
+|One copy
+|One copy per version
+
+|Old citations
+|Break silently
+|Still resolve
+
+|Query default
+|Only the current text exists
+|Filter `version = "current"`
+
+|Use for
+|Wikis, internal docs
+|Policies, contracts, regulated content
+|===
+
+With versioning, cite `doc_id + version`, mark exactly one version `current`, and
+keep the rest retrievable but filtered out by default. A citation to "Refund
+Policy p.1" is worthless if the policy changed — see
+xref:RAG_Citations.adoc#_attribution_and_compliance[attribution and compliance].
+
+== Multi-Tenancy and Access Control
+
+This is where RAG systems leak data, and the failure is always the same shape:
+the filter was applied somewhere other than the query.
+
+[cols="1,2,2", options="header"]
+|===
+|Strategy |Isolation |Trade-off
+
+|*Collection per tenant*
+|Strongest — no shared index
+|Overhead per tenant; awkward above ~1000 tenants
+
+|*Metadata filter*
+|Good, if the filter is enforced centrally
+|One code path that forgets it leaks everything
+
+|*Row-level security* (pgvector)
+|Enforced by the database, not the app
+|Postgres only — and a strong argument for pgvector
+
+|*Namespace / partition*
+|Store-native (Pinecone namespaces, Qdrant shard keys)
+|Varies by vendor
+|===
+
+Non-negotiables regardless of strategy:
+
+* *Derive the filter from the authenticated principal*, never from a
+  client-supplied parameter. A `tenant_id` in the request body is a suggestion,
+  not an authorisation.
+* *Enforce it in one place* — a repository method every caller goes through, not
+  a `where` clause copy-pasted into each call site.
+* *Filter before the model sees anything.* Once a chunk is in the prompt, it is
+  disclosed; no amount of instruction prevents the model from using it.
+* *Re-check at citation render time.* Retrieval and rendering can be separated by
+  a cache; a stale permission is a disclosure.
+* *Test it.* An automated test where user A queries for a phrase that exists only
+  in user B's document, asserting zero results.
+
+Permission drift, exfiltration channels and the wider threat model are in
+xref:RAG_Security.adoc[RAG Security].
+
+== Ingestion Pipeline
+
+[mermaid]
+....
+flowchart TB
+    S[Source: S3, SharePoint,<br/>Confluence, Git, upload] --> W[Watcher / webhook /<br/>scheduled crawl]
+    W --> Q[[Job queue]]
+    Q --> P[Parse — Docling]
+    P --> C[Chunk — structural]
+    C --> X[Contextualise<br/>optional]
+    X --> E[Embed — batched]
+    E --> ST[(Vector store)]
+    X --> B[(BM25 index)]
+    P --> REG[(Document registry)]
+
+    P -.->|failure| DLQ[[Dead letter queue]]
+    E -.->|rate limit| RET[Retry with backoff]
+
+    DLQ --> AL[Alert + admin UI:<br/>which documents<br/>are NOT indexed]
+
+    style DLQ fill:#fce8e6,stroke:#ea4335
+    style REG fill:#e8f0fe,stroke:#4285f4
+....
+
+Operational points that matter more than they look:
+
+* *A dead-letter queue with visibility.* The worst failure in RAG is a document
+  that silently failed to index — the system answers "I don't have information
+  about that" and everyone assumes the model is bad. An admin view of
+  "documents known but not indexed" catches it.
+* *Batch embeddings.* One `encode()` over 1000 chunks is far faster than 1000
+  calls, and API providers rate-limit per request.
+* *Make deletion propagate.* When a source document is deleted, the index must
+  follow. A tombstone or a periodic reconciliation job against the source of
+  truth prevents deleted content answering queries indefinitely.
+* *Record the model and prompt versions* used at ingest, so you know what needs
+  re-indexing when you change either.
+
+== Re-Indexing
+
+Some changes invalidate the whole index. Plan for it as a migration, not an
+update.
+
+[cols="1,2", options="header"]
+|===
+|Change |Requires
+
+|New embedding model
+|Full re-embed. Dual-write to a new collection, switch reads atomically, drop the old
+
+|New chunking strategy
+|Full re-parse and re-embed
+
+|Changed contextual-retrieval prompt
+|Full re-contextualise and re-embed
+
+|New metadata field
+|Backfill only — no re-embed if `embed_text` is unchanged
+
+|Document content changed
+|That document only, via `upsert`
+|===
+
+The dual-write pattern is worth the effort: a re-index that requires downtime
+will be postponed indefinitely, and the index will drift from the corpus. The
+full procedure — shadow, evaluate, canary, switch, and why you keep the old
+collection — is in xref:RAG_Operations.adoc#_migrations[Migrations].

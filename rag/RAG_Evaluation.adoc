@@ -1,0 +1,403 @@
+= Evaluation and Metrics
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Without evaluation, every RAG decision is a guess dressed as an opinion. This is
+the one part of the stack that is not optional, and the one most often skipped.
+
+📄 xref:examples/ragas_eval.py[`examples/ragas_eval.py`]
+
+== The Central Idea: Split at the Seam
+
+A RAG answer can be wrong for two unrelated reasons, and a single score hides
+which. So the metrics split along the pipeline seam.
+
+[mermaid]
+....
+flowchart TB
+    Q[Question] --> R[Retrieval]
+    R --> C[Context]
+    C --> G[Generation]
+    G --> A[Answer]
+
+    R -.->|"measured by"| RM["**Retrieval metrics**<br/>context_precision<br/>context_recall<br/>hit-rate@k · MRR · nDCG"]
+    G -.->|"measured by"| GM["**Generation metrics**<br/>faithfulness<br/>answer_relevancy<br/>answer_correctness"]
+
+    RM --> D{Diagnosis}
+    GM --> D
+
+    D --> D1["recall LOW<br/>→ retrieval problem<br/>generation is innocent"]
+    D --> D2["recall HIGH, precision LOW<br/>→ reranking problem"]
+    D --> D3["context fine, faithfulness LOW<br/>→ generation problem<br/>retrieval is innocent"]
+    D --> D4["all high, users unhappy<br/>→ your test set doesn't<br/>look like real traffic"]
+
+    style RM fill:#e6f4ea,stroke:#34a853
+    style GM fill:#f3e8fd,stroke:#a142f4
+    style D4 fill:#fef7e0,stroke:#fbbc04
+....
+
+That decision table is the entire value of splitting the metrics. Without it you
+know the system is bad; with it you know *which stage to change*.
+
+== What Is RAGAS
+
+link:https://github.com/explodinggradients/ragas[RAGAS] ("Retrieval Augmented
+Generation Assessment",
+link:https://arxiv.org/abs/2309.15217[Es et al., 2023]) is the de-facto standard
+open-source evaluation framework for RAG.
+
+Its defining claim was *reference-free* evaluation: most of its metrics need only
+the question, the retrieved contexts and the generated answer — no
+human-written gold answer. It gets there by decomposing outputs with an LLM
+(splitting an answer into atomic claims, generating questions from an answer) and
+checking those pieces against the context.
+
+[mermaid]
+....
+flowchart TB
+    IN["Input row:<br/>question · answer ·<br/>contexts[] · ground_truth?"]
+
+    IN --> F["**faithfulness**<br/>1. split answer into claims<br/>2. can each claim be inferred<br/>from the context?<br/>score = supported / total"]
+
+    IN --> AR["**answer_relevancy**<br/>1. generate N questions the<br/>answer would answer<br/>2. cosine vs the real question<br/>score = mean similarity"]
+
+    IN --> CP["**context_precision**<br/>for each retrieved chunk:<br/>was it useful for the answer?<br/>score = rank-weighted precision"]
+
+    IN --> CR["**context_recall**<br/>split ground_truth into claims<br/>score = claims attributable<br/>to the context / total"]
+
+    F --> GEN[Generation side]
+    AR --> GEN
+    CP --> RET[Retrieval side]
+    CR --> RET
+
+    style GEN fill:#f3e8fd,stroke:#a142f4
+    style RET fill:#e6f4ea,stroke:#34a853
+....
+
+=== The Core Four
+
+[cols="1,1,3,2", options="header"]
+|===
+|Metric |Needs GT |What it measures |Low score means
+
+|`faithfulness`
+|no
+|Fraction of the answer's atomic claims that can be inferred from the retrieved context
+|Hallucination. Fix the prompt, the model, or add xref:RAG_Citations.adoc[citation verification]
+
+|`answer_relevancy`
+|no
+|Whether the answer addresses the question asked (via reverse-generated questions)
+|The model rambled, hedged, or answered a near-miss question
+
+|`context_precision`
+|yes (or answer)
+|Of the retrieved chunks, how many were useful — weighted by rank
+|Too much noise. Add xref:RAG_Reranking.adoc[reranking], raise the threshold, lower `k`
+
+|`context_recall`
+|yes
+|Of the claims needed to answer, how many are present in the retrieved context
+|The answer is unreachable. Fix xref:RAG_Chunking.adoc[chunking], add xref:RAG_Hybrid_Search.adoc[hybrid search], raise `k`
+|===
+
+`context_recall` is the one that needs a real ground-truth answer, and it is also
+the most important — it is your *ceiling*. If recall is 0.6, no prompt, model or
+reranker gets end-to-end quality past 0.6.
+
+=== Other RAGAS Metrics
+
+[cols="1,3", options="header"]
+|===
+|Metric |Use
+
+|`answer_correctness`
+|Factual + semantic overlap with ground truth. The closest thing to a single headline number
+
+|`answer_similarity`
+|Pure embedding similarity to ground truth. Cheap, crude
+
+|`context_entity_recall`
+|Fraction of ground-truth entities present in the context. Good for entity-heavy corpora
+
+|`noise_sensitivity`
+|How much an irrelevant chunk in the context degrades the answer
+
+|`aspect_critic`
+|Custom binary LLM judgements: "is this answer harmful / on-policy / actionable?"
+
+|Agent metrics (`tool_call_accuracy`, `topic_adherence`)
+|For xref:RAG_Architectures.adoc#_agentic_rag[agentic RAG]
+|===
+
+=== Using It
+
+[source,python]
+----
+from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import (context_precision, context_recall,
+                           faithfulness, answer_relevancy)
+
+rows = {"question": [...], "answer": [...],
+        "contexts": [[...], [...]],       # list[list[str]] — one list per row
+        "ground_truth": [...]}
+
+result = evaluate(Dataset.from_dict(rows),
+                  metrics=[context_precision, context_recall,
+                           faithfulness, answer_relevancy])
+----
+
+*Caveats worth internalising:*
+
+* Most metrics are *LLM-judged*, so they are estimates with variance. Use them to
+  compare versions of your own pipeline, never as absolute grades.
+* Always eyeball a sample of the judgements before trusting a delta. LLM judges
+  fail in systematic ways on domain text — an unfamiliar acronym reads as an
+  unsupported claim.
+* Judge cost is real. A 200-row eval across four metrics is thousands of LLM
+  calls.
+* Pin the judge model and the RAGAS version. A judge upgrade moves every score,
+  and you will spend a day chasing a regression that was a version bump.
+
+== Retrieval Metrics
+
+Deterministic, free, and stable enough to gate CI on. Run these on every commit;
+run RAGAS nightly.
+
+[cols="1,3,2", options="header"]
+|===
+|Metric |Definition |Sensitive to
+
+|`hit-rate@k` / `recall@k`
+|Did *any* relevant chunk make the top k?
+|Retrieval coverage. Your ceiling
+
+|`MRR`
+|`1/rank` of the first relevant hit, averaged
+|Exactly what reranking improves
+
+|`nDCG@k`
+|Graded relevance with a `log₂` positional discount, normalised by the ideal ordering
+|Ordering quality with multi-level labels
+
+|`precision@k`
+|Fraction of the top k that is relevant
+|Noise in the context window
+
+|`MAP`
+|Mean average precision across all relevant items
+|Overall ranking quality
+|===
+
+[source,python]
+----
+def mrr(retrieved_ids, relevant_ids):
+    for rank, cid in enumerate(retrieved_ids, start=1):
+        if cid in relevant_ids:
+            return 1.0 / rank
+    return 0.0
+
+def ndcg_at_k(retrieved_ids, relevance, k):
+    dcg = sum(relevance.get(cid, 0.0) / math.log2(i + 1)
+              for i, cid in enumerate(retrieved_ids[:k], start=1))
+    ideal = sorted(relevance.values(), reverse=True)[:k]
+    idcg = sum(rel / math.log2(i + 1) for i, rel in enumerate(ideal, start=1))
+    return dcg / idcg if idcg else 0.0
+----
+
+*A useful invariant:* adding a reranker should improve MRR and nDCG@5 while
+leaving hit-rate@50 *unchanged*. If hit-rate@50 moves, the reranker is being fed
+a different candidate pool than you think.
+
+== Building the Eval Set
+
+Thirty to fifty hand-written cases beat five thousand synthetic ones. Seed from
+real user queries, and deliberately include every hard class:
+
+[cols="1,3", options="header"]
+|===
+|Class |Why it must be in the set
+
+|*Simple factual*
+|The baseline. If this fails, nothing else matters
+
+|*Lexical*
+|An exact ID, acronym or figure — the case dense-only retrieval fails
+
+|*Paraphrase*
+|No vocabulary overlap with the source — the case BM25-only fails
+
+|*Multi-hop*
+|Needs two chunks combined — the case single-retrieval pipelines fail
+
+|*Negative*
+|The corpus genuinely does not contain the answer. Measures refusal, which is a *success* condition
+
+|*Ambiguous*
+|Two valid readings. Measures whether the system asks or guesses
+
+|*Temporal*
+|"the current policy" — measures whether versioning works
+
+|*Adversarial*
+|A question whose false premise the corpus contradicts
+|===
+
+*Synthetic generation* (RAGAS's `TestsetGenerator`, or prompting an LLM to write
+questions from each chunk) is a reasonable way to reach volume, but it has a
+systematic bias: questions generated *from* a chunk are answerable *by* that
+chunk, so recall looks better than it is. Real queries are messier, shorter, and
+often unanswerable. Use synthetic data to broaden coverage, never as the whole
+set.
+
+== Frameworks
+
+[cols="1,3,2", options="header"]
+|===
+|Tool |Strength |Link
+
+|*RAGAS*
+|The standard. Reference-free metrics, synthetic test generation, framework-agnostic
+|link:https://github.com/explodinggradients/ragas[repo]
+
+|*DeepEval*
+|Pytest-style assertions — `assert_test(case, [FaithfulnessMetric(threshold=0.8)])`. Natural fit for CI
+|link:https://github.com/confident-ai/deepeval[repo]
+
+|*TruLens*
+|"RAG triad" (context relevance, groundedness, answer relevance) with live instrumentation
+|link:https://github.com/truera/trulens[repo]
+
+|*Phoenix / Arize*
+|Tracing plus evaluation; strong for debugging a specific bad answer
+|link:https://github.com/Arize-ai/phoenix[repo]
+
+|*LangSmith*
+|Datasets, traces, annotation queues, regression comparison. Hosted
+|link:https://smith.langchain.com[site]
+
+|*Promptfoo*
+|Declarative YAML test suites; good for prompt-level A/B
+|link:https://github.com/promptfoo/promptfoo[repo]
+
+|*BEIR / MTEB*
+|Standard retrieval benchmarks for *model selection*, not for your pipeline
+|link:https://github.com/beir-cellar/beir[BEIR]
+|===
+
+== Putting It in CI
+
+[mermaid]
+....
+flowchart TB
+    PR[Pull request] --> FAST["Fast gate — every commit<br/>deterministic retrieval metrics<br/>on 50 labelled queries<br/>~10 s, £0"]
+    FAST -->|"hit-rate@10 < baseline − 2%"| BLOCK[❌ Block merge]
+    FAST -->|pass| MERGE[Merge]
+
+    MERGE --> NIGHT["Nightly — RAGAS<br/>faithfulness · relevancy ·<br/>precision · recall<br/>~10 min, judge cost"]
+    NIGHT --> DASH[Dashboard + alert on drift]
+
+    PROD[Production traffic] --> SAMPLE["Sample 1% of answers"]
+    SAMPLE --> ONLINE["Online signals:<br/>thumbs · citation click-through ·<br/>refusal rate · retrieval latency ·<br/>'no results' rate"]
+    ONLINE --> DASH
+    ONLINE -.->|"hard cases become<br/>new eval rows"| FAST
+
+    style FAST fill:#e6f4ea,stroke:#34a853
+    style BLOCK fill:#fce8e6,stroke:#ea4335
+....
+
+The dashed arrow is the part that compounds: every production failure that gets
+added to the eval set is a regression you can never ship twice. An eval set that
+does not grow from real traffic goes stale within a quarter.
+
+== Online Signals
+
+Offline metrics measure the pipeline; online signals measure whether it helps
+anyone. Turning these into alerts, and diagnosing an individual bad answer rather
+than an aggregate, is xref:RAG_Operations.adoc[Production Operations].
+
+[cols="1,3", options="header"]
+|===
+|Signal |Reads as
+
+|Thumbs up/down rate
+|Blunt but real. Segment by query type before drawing conclusions
+
+|Citation click-through
+|Users checking sources — high engagement, or low trust. Read alongside thumbs
+
+|Refusal rate
+|Should be *non-zero*. A system that never says "I don't know" is hallucinating
+
+|"No results" rate
+|Retrieval coverage gaps — often a missing document, not a tuning problem
+
+|Follow-up rate
+|A high rate of immediate rephrasing means the first answer missed
+
+|Copy / export rate
+|Strong positive signal, and harder to game than thumbs
+
+|p50 / p99 latency per stage
+|Where the budget actually goes. Usually the LLM, sometimes a cold reranker
+|===
+
+== An Ablation Discipline
+
+The only honest way to know whether a stage earns its latency on *your* corpus:
+turn one stage off at a time and re-measure.
+
+[cols="2,1,1,1,1", options="header"]
+|===
+|Configuration |hit@10 |MRR |faithful. |p95 ms
+
+|Dense only (baseline)
+|0.62
+|0.41
+|0.78
+|180
+
+|+ hybrid (BM25 + RRF)
+|0.81
+|0.55
+|0.84
+|205
+
+|+ cross-encoder rerank
+|0.81
+|0.79
+|0.91
+|340
+
+|+ contextual compression
+|0.81
+|0.79
+|0.93
+|380
+
+|+ RAG-Fusion
+|0.84
+|0.80
+|0.93
+|1250
+|===
+
+Illustrative numbers, but the *shape* is what recurs in practice: hybrid moves
+recall, reranking moves MRR without touching recall, compression buys a little
+faithfulness cheaply, and query expansion buys a little recall for a lot of
+latency. Run this table on your own corpus — the ordering of the last two rows in
+particular is corpus-dependent.
+
+`PipelineConfig` in
+xref:examples/production_rag_pipeline.py[`examples/production_rag_pipeline.py`]
+exists exactly for this: every stage is a boolean flag.
+
+Add cost and p95 columns to this table and the trade-offs become arguable rather
+than aesthetic — see
+xref:RAG_Cost_Latency.adoc#_putting_it_together[Cost and Latency Budgeting].

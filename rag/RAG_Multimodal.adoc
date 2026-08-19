@@ -1,0 +1,373 @@
+= Multimodal RAG
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+The answer is in a bar chart, an architecture diagram, a scanned form, a
+screenshot of a settings panel, or a table whose meaning lives entirely in its
+layout. Text extraction turns all of those into soup, and every stage downstream
+faithfully processes the soup.
+
+📄 xref:examples/multimodal_rag.py[`examples/multimodal_rag.py`]
+
+== What Text-Only RAG Loses
+
+[mermaid]
+....
+flowchart TB
+    P[/"Page: a revenue chart,<br/>a 3-column table,<br/>an architecture diagram"/]
+
+    P --> T["Text extraction<br/>(any parser)"]
+    T --> T1["'Revenue Q1 Q2 Q3 Q4<br/>314 442 term 401 mixed<br/>Figure 3'<br/><br/>❌ the chart's TREND is gone<br/>❌ the table's row/column<br/>   relationships are gone<br/>❌ the diagram's ARROWS —<br/>   the actual content — are gone"]
+
+    P --> V["Visual indexing"]
+    V --> V1["Page kept as an image<br/>+ a VLM-written description<br/>or a visual embedding<br/><br/>✅ 'revenue grew each quarter<br/>   except a Q3 dip'<br/>✅ 'the gateway calls the ledger,<br/>   which writes to the queue'"]
+
+    T1 --> BAD([❌ unanswerable])
+    V1 --> GOOD([✅ answerable])
+
+    style T1 fill:#fce8e6,stroke:#ea4335
+    style V1 fill:#e6f4ea,stroke:#34a853
+....
+
+The distinction that matters: some images are *decorative* and some are
+*load-bearing*. A stock photo in a marketing PDF is noise. A sequence diagram in
+an architecture document often carries information that appears nowhere in the
+prose — the author drew it *instead of* writing it. Text-only RAG silently drops
+exactly the second category.
+
+*A cheap triage before building anything:* sample 50 questions your users
+actually ask, and count how many have their answer in a figure, a table image or
+a scan. If it is under ~5%, fix xref:RAG_Chunking.adoc[parsing and chunking]
+first — a good layout parser already recovers most tables as text. Multimodal
+retrieval earns its complexity when the answer is genuinely *pictorial*.
+
+== Three Strategies
+
+[mermaid]
+....
+flowchart TB
+    D[Document with figures] --> S1 & S2 & S3
+
+    subgraph S1["① Text-proxy indexing"]
+        direction TB
+        A1["VLM writes a description<br/>of each figure"] --> A2["Embed the DESCRIPTION<br/>with your normal text model"]
+        A2 --> A3["Store image alongside;<br/>retrieval hits the text,<br/>the text points at the image"]
+    end
+
+    subgraph S2["② Unified embedding"]
+        direction TB
+        B1["Embed images AND text into<br/>one shared vector space<br/>(CLIP, SigLIP, voyage-multimodal)"] --> B2["A text query finds<br/>images directly"]
+    end
+
+    subgraph S3["③ Visual document retrieval"]
+        direction TB
+        C1["Screenshot every PAGE"] --> C2["Embed the page image with a<br/>VLM using late interaction<br/>(ColPali / ColQwen)"]
+        C2 --> C3["No parsing, no chunking,<br/>no OCR — at all"]
+    end
+
+    style S1 fill:#e8f0fe,stroke:#4285f4
+    style S2 fill:#fef7e0,stroke:#fbbc04
+    style S3 fill:#e6f4ea,stroke:#34a853
+....
+
+[cols="1,2,2,2", options="header"]
+|===
+|
+|① Text-proxy
+|② Unified embedding
+|③ Visual (ColPali)
+
+|Index-time cost
+|1 VLM call per figure
+|One embedding pass
+|One embedding pass, ~1000 vectors/page
+
+|Infrastructure
+|What you already run
+|A multimodal index
+|Late-interaction index + GPU
+
+|Retrieval quality ceiling
+|Capped by description quality
+|Weak on text-in-image and fine detail
+|Highest on visually complex documents
+
+|Explainability
+|High — you can read the description
+|Low
+|Medium — you can see which patches matched
+
+|Storage
+|Normal
+|Normal
+|~100x (late interaction)
+
+|Works with an existing pipeline
+|✅ drop-in
+|⚠️ new index
+|❌ replaces the pipeline
+
+|Start here if
+|You have a working text RAG and some figures
+|Your corpus is genuinely image-first (product photos, slides)
+|Documents are scans, forms, or dense reports and quality is the priority
+|===
+
+*Recommendation:* start with ① unless you have a reason not to. It composes with
+everything already built — xref:RAG_Hybrid_Search.adoc[hybrid search],
+xref:RAG_Reranking.adoc[reranking], xref:RAG_Citations.adoc[citations] all keep
+working, because as far as the index is concerned a figure is just another text
+chunk. ③ is the quality ceiling and a genuinely different architecture; adopt it
+deliberately, not incrementally.
+
+== Strategy ①: Text-Proxy Indexing
+
+Ask a vision model to describe each figure, embed the description, keep the image
+for generation.
+
+[mermaid]
+....
+flowchart LR
+    P[Parse: extract figures<br/>+ their captions + page no] --> V["VLM: describe this figure,<br/>given its caption and the<br/>surrounding paragraph"]
+    V --> D["Description text"]
+    D --> E[Embed with your<br/>normal text model] --> IDX[(Same vector index<br/>as everything else)]
+    D --> B[(BM25 — descriptions<br/>index well lexically)]
+    P --> IMG[(Blob store:<br/>the actual image)]
+    IDX -.->|"chunk.image_uri"| IMG
+
+    Q[Query] --> IDX --> R[Retrieved:<br/>description + image_uri]
+    R --> G["Generate — pass the IMAGE<br/>to a vision model,<br/>not the description"]
+
+    style V fill:#fef7e0,stroke:#fbbc04
+    style G fill:#f3e8fd,stroke:#a142f4
+....
+
+Three details that decide whether this works:
+
+*Give the describer context.* A description written from the image alone says
+"a bar chart with four bars". A description written from the image *plus its
+caption and the paragraph that references it* says "quarterly revenue for FY2023,
+showing growth in Q1, Q2 and Q4 with a dip in Q3, referenced in the Financial
+Results section as evidence of seasonality". Only the second is retrievable by a
+real question.
+
+*Ask for the data, not the appearance.* Charts should be transcribed to values
+where the values are readable; tables to Markdown; diagrams to their
+relationships. "Describe this image" produces prose about colours. See the prompt
+in the example file.
+
+*At generation time, pass the image.* The description is a *retrieval* device,
+like a xref:RAG_Techniques.adoc#_hyde[HyDE hypothesis] or a
+xref:RAG_Techniques.adoc#_contextual_retrieval[contextual preamble]. Answering
+from the description compounds any error it contains; answering from the image
+does not. This also matters for
+xref:RAG_Citations.adoc[citations] — a claim should be traceable to the figure,
+never to model-written text about the figure.
+
+== Strategy ②: Unified Embedding
+
+One vector space for both modalities, so a text query retrieves images directly.
+
+[cols="1,2,2", options="header"]
+|===
+|Model |Good at |Weak at
+
+|CLIP / OpenCLIP
+|Natural images, object and scene matching
+|Text inside images; fine-grained detail; long queries (77-token limit)
+
+|SigLIP
+|Same, with better training; stronger zero-shot
+|Same structural limits
+
+|`voyage-multimodal-3`
+|Interleaved text+image documents, screenshots
+|Hosted only
+
+|Cohere `embed-v4`
+|Mixed documents; native `input_type` handling
+|Hosted only
+
+|`jina-clip-v2`
+|Text-text *and* text-image in one model
+|Weaker than a dedicated text model on text-only retrieval
+|===
+
+*The CLIP trap:* CLIP-family models are trained on short alt-text captions, so
+they match "a photo of a dog" well and "the third-quarter revenue dip" badly.
+They are excellent for photo libraries and product catalogues, and a poor fit for
+documents — which is what most RAG corpora are. Check that your use case is
+actually image-*similarity* before reaching for them.
+
+*Watch the modality gap:* in most joint spaces, image vectors cluster with image
+vectors and text with text, so a raw cosine threshold that works for text-text
+does not transfer. Either calibrate per modality pair, or retrieve each modality
+separately and fuse with xref:RAG_Hybrid_Search.adoc#_reciprocal_rank_fusion[RRF]
+— which sidesteps the incomparability entirely.
+
+== Strategy ③: Visual Document Retrieval (ColPali)
+
+link:https://arxiv.org/abs/2407.01449[ColPali (Faysse et al., 2024)] deletes the
+parsing pipeline. Screenshot each page, embed the image with a vision-language
+model using ColBERT-style late interaction, and match query tokens against image
+patches.
+
+[mermaid]
+....
+flowchart TB
+    subgraph CLASSIC["Classic pipeline"]
+        direction LR
+        X1[PDF] --> X2[Layout parse] --> X3[Chunk] --> X4[Embed text] --> X5[(Index)]
+        X2 -.->|"errors here<br/>propagate everywhere"| X6[⚠️]
+    end
+
+    subgraph COLPALI["ColPali"]
+        direction LR
+        Y1[PDF] --> Y2["Render each page<br/>to an image"] --> Y3["VLM → ~1030 patch<br/>embeddings per page"] --> Y4[(Late-interaction<br/>index)]
+    end
+
+    Q["Query: 'which quarter<br/>had the revenue dip?'"] --> M["MaxSim: each query token<br/>vs every page patch"]
+    Y4 -.-> M
+    M --> R["Ranked PAGES<br/>+ a heatmap of which<br/>patches matched"]
+    R --> G["VLM answers from<br/>the page image"]
+
+    style CLASSIC fill:#fce8e6,stroke:#ea4335
+    style COLPALI fill:#e6f4ea,stroke:#34a853
+....
+
+*Why it wins on hard documents:* there is no lossy text bottleneck. Reading order,
+table structure, chart shape, handwriting, stamps, form layout — all of it stays
+in the representation, because the representation *is* the page.
+
+*What it costs:*
+
+[cols="1,3", options="header"]
+|===
+|Cost |Detail
+
+|Storage
+|~1030 patch vectors per page vs ~5 chunk vectors. Binary quantisation and pooling bring this down but it stays an order of magnitude above text
+
+|Compute
+|A VLM forward pass per page at index time; a GPU is effectively required
+
+|Granularity
+|Retrieves *pages*, not passages. Citations point at a page, and the generation prompt carries a whole page of tokens
+
+|Ecosystem
+|Late-interaction indexing is supported by Vespa, Qdrant (multivectors) and specialised stores — not by every vector DB
+|===
+
+*Variants:* ColQwen2 (Qwen2-VL backbone, generally stronger), ColSmol (small
+enough for CPU-ish deployment), and pooling strategies that cut the vector count
+several-fold for a small quality loss.
+
+*How to decide between ③ and a good parser:* run both on 30 real pages from your
+corpus and compare hit-rate@5. On clean, well-structured, text-heavy PDFs,
+xref:RAG_Chunking.adoc#_docling[Docling] plus normal retrieval is usually within
+a few points at a fraction of the cost. On scans, forms, dense financial reports
+and slide decks, ColPali's margin is large. This is genuinely corpus-dependent —
+there is no defensible answer without measuring.
+
+== Tables and Charts Specifically
+
+Most "multimodal" RAG questions in practice are table questions, and tables have
+a better answer than either extreme.
+
+[cols="1,3", options="header"]
+|===
+|Content |Best handling
+
+|Table with real text (digital PDF)
+|Layout parser → Markdown table, kept whole with its caption and headers. Not a multimodal problem at all — see xref:RAG_Chunking.adoc#_structure_aware_parsing[structure-aware parsing]
+
+|Table as an image (scan)
+|VLM transcription to Markdown at ingest, verified by round-tripping a few cells
+
+|Chart with a readable data table nearby
+|Index the table; the chart is redundant
+
+|Chart with no underlying data
+|VLM description that states the *trend and the extremes*, not the colours
+
+|Diagram / flowchart
+|VLM description enumerating nodes and edges as relationships
+
+|Screenshot of UI
+|VLM description of the visible labels and state, plus OCR of the text as a BM25 field
+
+|Form / invoice
+|Field extraction to structured JSON; then this is xref:RAG_Architectures.adoc#_structured_sql_rag[structured retrieval], not RAG
+|===
+
+*Never split a table across chunks.* A row detached from its header row is a list
+of numbers with no meaning, and the model will invent column names for it. Keep
+table + caption + headers as one unit, and if it exceeds the chunk budget, repeat
+the header row in each part.
+
+== Citations for Visual Sources
+
+A multimodal citation has to point at something the user can *look at*:
+
+* Cite `doc_id + page + bounding box` where the parser gives you one, so the UI
+  can highlight the region.
+* Render the figure inline in the answer, not a text description of it. The image
+  is the evidence.
+* Never quote the VLM-written description as source text. It is model output, and
+  presenting it as a source is exactly the attribution failure that
+  xref:RAG_Citations.adoc#_quote_verification[quote verification] exists to catch.
+  Store it in a separate field, as with the
+  xref:RAG_Techniques.adoc#_contextual_retrieval[contextual preamble].
+* For ColPali, the MaxSim patch scores give you a heatmap — showing *which part of
+  the page* matched is a strong explainability affordance most text RAG cannot
+  offer.
+
+== Evaluation
+
+Text metrics transfer, but the eval set needs cases that only a visual system can
+pass, or you will measure nothing:
+
+[cols="1,3", options="header"]
+|===
+|Case class |Example
+
+|*Chart-only*
+|"Which quarter had the revenue dip?" — the answer appears in no sentence
+
+|*Table-only*
+|"What is the timeout for the EU region?" — a cell, not prose
+
+|*Diagram-only*
+|"Which service writes to the ledger?" — an arrow, not a sentence
+
+|*Scanned*
+|A page with no extractable text layer at all
+
+|*Cross-modal*
+|Needs a figure and a paragraph combined
+
+|*Decoy*
+|A question whose answer is in the text, on a page full of figures — catches a visual system that ignores prose
+|===
+
+Benchmarks worth knowing: link:https://huggingface.co/vidore[ViDoRe] (the
+visual document retrieval benchmark ColPali introduced), DocVQA, ChartQA,
+InfographicVQA.
+
+== Resources
+
+* link:https://github.com/illuin-tech/colpali[illuin-tech/colpali] — reference implementation
+* link:https://huggingface.co/vidore[ViDoRe benchmark and leaderboard]
+* link:https://arxiv.org/abs/2407.01449[ColPali paper]
+* link:https://github.com/AnswerDotAI/byaldi[AnswerDotAI/byaldi] — a friendly ColPali wrapper
+* link:https://github.com/QwenLM/Qwen2-VL[Qwen2-VL] — the ColQwen backbone
+* link:https://github.com/docling-project/docling[Docling] — figure and table extraction with provenance
+* link:https://github.com/mlfoundations/open_clip[OpenCLIP] · link:https://github.com/google-research/big_vision[SigLIP]
+* link:https://docs.llamaindex.ai/en/stable/examples/multi_modal/[LlamaIndex multimodal examples]
+
+More in xref:RAG_Resources.adoc[Resources].

@@ -1,0 +1,282 @@
+= RAG Resources
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Curated links. Repositories are grouped by what you would actually go to them
+for, not by star count.
+
+== Technique Collections
+
+The best starting points — each covers many techniques with runnable notebooks.
+
+* link:https://github.com/NirDiamant/RAG_Techniques[NirDiamant/RAG_Techniques] —
+  the most comprehensive single collection: 30+ techniques, each with a notebook
+  and an explanation. Start here.
+* link:https://github.com/Jeevav62/Rag-techniques[Jeevav62/Rag-techniques] —
+  compact walkthroughs of the core technique set.
+* link:https://github.com/topics/advanced-rag[GitHub topic: advanced-rag] — the
+  live feed of what people are publishing.
+* link:https://github.com/topics/rag[GitHub topic: rag] ·
+  link:https://github.com/topics/retrieval-augmented-generation[topic: retrieval-augmented-generation]
+* link:https://github.com/athina-ai/rag-cookbooks[athina-ai/rag-cookbooks] —
+  advanced RAG cookbooks with evaluation built in.
+* link:https://github.com/Danielskry/Awesome-RAG[Danielskry/Awesome-RAG] ·
+  link:https://github.com/frutik/Awesome-RAG[frutik/Awesome-RAG] — link collections.
+* link:https://github.com/hymie122/RAG-Survey[hymie122/RAG-Survey] — papers
+  organised by the survey's taxonomy.
+
+== Hierarchical and Structured RAG
+
+* link:https://github.com/pheonix-delta/WiredBrain-Hierarchical-Rag[pheonix-delta/WiredBrain-Hierarchical-Rag] —
+  hierarchical retrieval over a document tree.
+* link:https://github.com/parthsarthi03/raptor[parthsarthi03/raptor] — RAPTOR
+  reference implementation (recursive clustering + summarisation).
+* link:https://github.com/microsoft/graphrag[microsoft/graphrag] — the GraphRAG
+  reference implementation, including global map-reduce search.
+* link:https://github.com/HKUDS/LightRAG[HKUDS/LightRAG] — a much lighter graph
+  RAG.
+* link:https://github.com/circlemind-ai/fast-graphrag[circlemind-ai/fast-graphrag] —
+  PageRank-based graph retrieval.
+* link:https://github.com/neo4j-labs/llm-graph-builder[neo4j-labs/llm-graph-builder] —
+  build a knowledge graph from documents.
+
+== Hybrid Search
+
+* link:https://github.com/kolhesamiksha/Hybrid-Search-RAG[kolhesamiksha/Hybrid-Search-RAG]
+* link:https://github.com/gwyer/hybrid-rag-project[gwyer/hybrid-rag-project]
+* link:https://github.com/xhluca/bm25s[xhluca/bm25s] — fast pure-Python BM25.
+* link:https://github.com/dorianbrown/rank_bm25[dorianbrown/rank_bm25] — the
+  simple, ubiquitous BM25 implementation.
+* link:https://github.com/naver/splade[naver/splade] — learned sparse retrieval.
+* link:https://qdrant.tech/documentation/concepts/hybrid-queries/[Qdrant hybrid queries] —
+  the clearest vendor documentation of RRF-based hybrid.
+* link:https://weaviate.io/blog/hybrid-search-explained[Weaviate: hybrid search explained]
+
+== Reranking
+
+* link:https://github.com/FlagOpen/FlagEmbedding[FlagOpen/FlagEmbedding] — BGE
+  embeddings *and* the `bge-reranker` family.
+* link:https://github.com/UKPLab/sentence-transformers[sentence-transformers] —
+  `CrossEncoder`, the standard local reranking API.
+* link:https://github.com/AnswerDotAI/rerankers[AnswerDotAI/rerankers] — one
+  interface over cross-encoders, ColBERT, LLM rerankers and hosted APIs.
+* link:https://github.com/stanford-futuredata/ColBERT[stanford-futuredata/ColBERT] ·
+  link:https://github.com/AnswerDotAI/RAGatouille[RAGatouille] (friendly wrapper)
+* link:https://github.com/castorini/rank_llm[castorini/rank_llm] — listwise LLM
+  reranking (RankGPT, RankZephyr).
+* link:https://www.pinecone.io/learn/series/rag/rerankers/[Pinecone: rerankers] —
+  a good conceptual explainer.
+
+== Parsing and Chunking
+
+* link:https://github.com/docling-project/docling[docling-project/docling] —
+  layout-aware parsing plus `HybridChunker`.
+* link:https://github.com/Unstructured-IO/unstructured[Unstructured-IO/unstructured]
+* link:https://github.com/datalab-to/marker[datalab-to/marker] — fast PDF → Markdown.
+* link:https://github.com/illuin-tech/colpali[illuin-tech/colpali] — embed page
+  images, skip parsing entirely.
+* link:https://github.com/run-llama/llama_parse[run-llama/llama_parse]
+* link:https://github.com/benbrandt/text-splitter[benbrandt/text-splitter] —
+  fast Rust splitters with Python bindings.
+* link:https://research.trychroma.com/evaluating-chunking[Chroma: evaluating chunking strategies] —
+  a rare *empirical* comparison rather than an opinion piece.
+
+== Multimodal
+
+* link:https://github.com/illuin-tech/colpali[illuin-tech/colpali] — visual
+  document retrieval; embeds page images, no OCR.
+* link:https://huggingface.co/vidore[ViDoRe] — the visual document retrieval
+  benchmark and leaderboard.
+* link:https://github.com/AnswerDotAI/byaldi[AnswerDotAI/byaldi] — a friendly
+  ColPali wrapper.
+* link:https://github.com/QwenLM/Qwen2-VL[QwenLM/Qwen2-VL] — the ColQwen backbone.
+* link:https://github.com/mlfoundations/open_clip[OpenCLIP] ·
+  link:https://github.com/google-research/big_vision[SigLIP]
+* link:https://docs.llamaindex.ai/en/stable/examples/multi_modal/[LlamaIndex multimodal examples]
+
+== Evaluation
+
+* link:https://github.com/explodinggradients/ragas[explodinggradients/ragas] —
+  the standard. Start here.
+* link:https://github.com/confident-ai/deepeval[confident-ai/deepeval] —
+  pytest-style RAG assertions; the natural CI fit.
+* link:https://github.com/truera/trulens[truera/trulens] — the RAG triad with
+  live instrumentation.
+* link:https://github.com/Arize-ai/phoenix[Arize-ai/phoenix] — tracing plus eval;
+  best for debugging one bad answer.
+* link:https://github.com/promptfoo/promptfoo[promptfoo/promptfoo]
+* link:https://github.com/beir-cellar/beir[beir-cellar/beir] — heterogeneous
+  retrieval benchmark.
+* link:https://huggingface.co/spaces/mteb/leaderboard[MTEB leaderboard] — read the
+  *retrieval* column.
+
+== Observability and Operations
+
+* link:https://github.com/Arize-ai/phoenix[Arize Phoenix] — RAG tracing and
+  span-level inspection.
+* link:https://smith.langchain.com[LangSmith] — traces, datasets, regression
+  comparison.
+* link:https://github.com/langfuse/langfuse[langfuse/langfuse] — self-hostable
+  LLM observability.
+* link:https://github.com/traceloop/openllmetry[traceloop/openllmetry] — OTel
+  instrumentation for LLM apps.
+* link:https://opentelemetry.io/docs/specs/semconv/gen-ai/[OpenTelemetry GenAI
+  semantic conventions]
+* link:https://github.com/evidentlyai/evidently[evidentlyai/evidently] — drift
+  detection.
+
+== Security
+
+* link:https://owasp.org/www-project-top-10-for-large-language-model-applications/[OWASP Top 10 for LLM Applications]
+* link:https://genai.owasp.org/[OWASP GenAI Security Project]
+* link:https://arxiv.org/abs/2302.12173[Indirect Prompt Injection] — the foundational paper
+* link:https://simonwillison.net/tags/prompt-injection/[Simon Willison on prompt injection]
+* link:https://github.com/protectai/rebuff[protectai/rebuff] ·
+  link:https://github.com/protectai/llm-guard[protectai/llm-guard]
+* link:https://github.com/leondz/garak[leondz/garak] — LLM vulnerability scanner
+
+== Frameworks and Orchestration
+
+* link:https://github.com/langchain-ai/langchain[langchain-ai/langchain] ·
+  link:https://github.com/langchain-ai/langgraph[langgraph] — the graph library is
+  the more useful half for agentic RAG.
+* link:https://github.com/run-llama/llama_index[run-llama/llama_index] — the
+  strongest set of RAG-specific abstractions (routers, node postprocessors,
+  query engines).
+* link:https://github.com/deepset-ai/haystack[deepset-ai/haystack] — explicit
+  pipeline graphs; production-oriented.
+* link:https://github.com/stanfordnlp/dspy[stanfordnlp/dspy] — compile prompts
+  and pipelines against a metric instead of hand-tuning them.
+* link:https://github.com/microsoft/semantic-kernel[microsoft/semantic-kernel]
+* link:https://github.com/infiniflow/ragflow[infiniflow/ragflow] — deep document
+  understanding, deployable end to end.
+* link:https://github.com/Mintplex-Labs/anything-llm[Mintplex-Labs/anything-llm] ·
+  link:https://github.com/open-webui/open-webui[open-webui] — full applications
+  worth reading for their document-management UX.
+* link:https://github.com/pathwaycom/llm-app[pathwaycom/llm-app] — streaming /
+  always-fresh indexes.
+
+== Vector Stores
+
+* link:https://github.com/chroma-core/chroma[Chroma] ·
+  link:https://github.com/qdrant/qdrant[Qdrant] ·
+  link:https://github.com/weaviate/weaviate[Weaviate] ·
+  link:https://github.com/milvus-io/milvus[Milvus]
+* link:https://github.com/pgvector/pgvector[pgvector] — the under-rated option.
+* link:https://github.com/lancedb/lancedb[LanceDB] — embedded and versioned.
+* link:https://github.com/facebookresearch/faiss[FAISS] ·
+  link:https://github.com/nmslib/hnswlib[hnswlib] — libraries, not databases.
+* link:https://github.com/asg017/sqlite-vec[sqlite-vec] — vectors in SQLite, for
+  edge and on-device.
+
+== Papers
+
+[cols="3,1,3", options="header"]
+|===
+|Paper |Year |Why it matters
+
+|link:https://arxiv.org/abs/2005.11401[Retrieval-Augmented Generation for Knowledge-Intensive NLP]
+|2020
+|The original RAG paper (Lewis et al.)
+
+|link:https://arxiv.org/abs/2004.04906[Dense Passage Retrieval (DPR)]
+|2020
+|Made dense retrieval work; the bi-encoder recipe
+
+|link:https://arxiv.org/abs/2004.12832[ColBERT]
+|2020
+|Late interaction
+
+|link:https://dl.acm.org/doi/10.1145/1571941.1572114[Reciprocal Rank Fusion]
+|2009
+|Where κ = 60 comes from
+
+|link:https://arxiv.org/abs/2212.10496[Precise Zero-Shot Dense Retrieval without Relevance Labels]
+|2022
+|HyDE
+
+|link:https://arxiv.org/abs/2305.14283[Query Rewriting for Retrieval-Augmented LLMs]
+|2023
+|RRR — Rewrite-Retrieve-Read
+
+|link:https://arxiv.org/abs/2310.06117[Take a Step Back]
+|2023
+|Step-back prompting
+
+|link:https://arxiv.org/abs/2307.03172[Lost in the Middle]
+|2023
+|Why context ordering matters
+
+|link:https://arxiv.org/abs/2309.15217[RAGAS: Automated Evaluation of RAG]
+|2023
+|Reference-free RAG metrics
+
+|link:https://arxiv.org/abs/2312.10997[RAG for LLMs: A Survey]
+|2023
+|The Naive / Advanced / Modular taxonomy
+
+|link:https://arxiv.org/abs/2310.11511[Self-RAG]
+|2023
+|Reflection tokens; learned retrieve/no-retrieve
+
+|link:https://arxiv.org/abs/2401.15884[Corrective RAG (CRAG)]
+|2024
+|Retrieval evaluator with fallback
+
+|link:https://arxiv.org/abs/2401.18059[RAPTOR]
+|2024
+|Recursive summarisation trees
+
+|link:https://arxiv.org/abs/2404.16130[From Local to Global: GraphRAG]
+|2024
+|Community summaries; corpus-wide questions
+
+|link:https://arxiv.org/abs/2409.04701[Late Chunking]
+|2024
+|Context-aware chunk embeddings
+
+|link:https://arxiv.org/abs/2407.01449[ColPali]
+|2024
+|Document retrieval from page images
+|===
+
+== Articles and Guides
+
+* link:https://www.anthropic.com/news/contextual-retrieval[Anthropic: Introducing Contextual Retrieval] —
+  the clearest write-up of an index-time technique with real numbers.
+* link:https://www.pinecone.io/learn/retrieval-augmented-generation/[Pinecone: RAG] ·
+  link:https://www.pinecone.io/learn/series/rag/[the whole RAG series]
+* link:https://simonwillison.net/2023/Oct/23/embeddings/[Simon Willison: Embeddings — what they are and why they matter]
+* link:https://docs.llamaindex.ai/en/stable/optimizing/production_rag/[LlamaIndex: Building performant RAG applications for production]
+* link:https://python.langchain.com/docs/concepts/retrieval/[LangChain: retrieval concepts]
+* link:https://huggingface.co/learn/cookbook/advanced_rag[Hugging Face cookbook: Advanced RAG]
+* link:https://blog.langchain.dev/deconstructing-rag/[LangChain: Deconstructing RAG]
+* link:https://eugeneyan.com/writing/llm-patterns/[Eugene Yan: Patterns for building LLM systems] —
+  the evaluation section in particular.
+* link:https://jina.ai/news/late-chunking-in-long-context-embedding-models/[Jina: Late chunking]
+* link:https://research.trychroma.com/evaluating-chunking[Chroma: Evaluating chunking strategies]
+
+== Courses
+
+* link:https://www.deeplearning.ai/short-courses/building-evaluating-advanced-rag/[DeepLearning.AI: Building and Evaluating Advanced RAG]
+* link:https://www.deeplearning.ai/short-courses/advanced-retrieval-for-ai/[DeepLearning.AI: Advanced Retrieval for AI with Chroma]
+* link:https://www.deeplearning.ai/short-courses/knowledge-graphs-rag/[DeepLearning.AI: Knowledge Graphs for RAG]
+* link:https://github.com/microsoft/generative-ai-for-beginners[microsoft/generative-ai-for-beginners]
+* link:https://developer.microsoft.com/en-us/reactor/events/26283/[Microsoft Reactor: Python + AI — RAG]
+* link:https://github.com/Azure-Samples/python-openai-demos[Azure-Samples/python-openai-demos] ·
+  link:https://github.com/Azure-Samples/vector-embeddings-demos[vector-embeddings-demos]
+
+== Related Documents in This Repository
+
+* xref:RAG_Multimodal.adoc[Multimodal RAG] · xref:RAG_Cost_Latency.adoc[Cost and Latency Budgeting]
+* xref:RAG_Security.adoc[RAG Security] · xref:RAG_Operations.adoc[RAG Production Operations]
+* xref:RAG_Top_30.adoc[RAG Top 30 Interview Answers]
+* xref:../../Samples/RAG_Document_QA_System.adoc[Worked system design: Document Q&A]
+* xref:../AI_guide.adoc[AI guide] — embeddings, quantization, fine-tuning vs RAG
+* xref:../AI_terms.adoc[AI terms] — general ML vocabulary
+* xref:../Machine_Learning.adoc[Machine Learning]
+* xref:../../Tech.adoc[Tech stack overview]

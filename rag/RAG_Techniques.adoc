@@ -1,0 +1,851 @@
+= Advanced RAG Techniques
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+A catalogue of retrieval techniques, each framed the same way: *what breaks in
+naive RAG*, *what the technique does about it*, *what it costs*, and *when not
+to use it*. Start from xref:RAG_Overview.adoc[the overview] for the pipeline
+these plug into.
+
+== Where Each Technique Applies
+
+Techniques are easiest to keep straight when grouped by the pipeline stage they
+modify. Almost every "advanced RAG" list is some subset of this map.
+
+[mermaid]
+....
+flowchart TB
+    Q([Query]) --> A
+
+    subgraph A["Pre-retrieval — change the query"]
+        A1[Query Rewriting / RRR]
+        A2[Multi-Query]
+        A3[RAG-Fusion]
+        A4[HyDE]
+        A5[Step-Back Prompting]
+        A6[Self-Query / metadata extraction]
+        A7[Routing]
+    end
+
+    A --> B
+
+    subgraph B["Retrieval — change how you search"]
+        B1[Dense / vector]
+        B2[Sparse / BM25]
+        B3[Hybrid + RRF]
+        B4[Parent-Child]
+        B5[Sentence-Window]
+        B6[Hierarchical / RAPTOR]
+        B7[Graph traversal]
+    end
+
+    B --> C
+
+    subgraph C["Post-retrieval — change the context"]
+        C1[Cross-encoder reranking]
+        C2[Contextual Compression]
+        C3[MMR / diversity]
+        C4[Lost-in-the-middle reorder]
+        C5[Deduplication]
+    end
+
+    C --> D
+
+    subgraph D["Generation — change the answer"]
+        D1[Cited claims]
+        D2[Self-RAG reflection]
+        D3[CRAG correction]
+        D4[Verification / entailment]
+    end
+
+    D --> E([Answer])
+
+    subgraph F["Index-time — change what you store"]
+        F1[Structural chunking]
+        F2[Contextual Retrieval]
+        F3[Late Chunking]
+        F4[Summary indexing]
+    end
+
+    F -.->|feeds| B
+
+    style A fill:#fef7e0,stroke:#fbbc04
+    style B fill:#e6f4ea,stroke:#34a853
+    style C fill:#fce8e6,stroke:#ea4335
+    style D fill:#f3e8fd,stroke:#a142f4
+    style F fill:#e8f0fe,stroke:#4285f4
+....
+
+== Naive RAG
+
+The baseline. Embed the query, take the top-k nearest chunks, put them in the
+prompt.
+
+[mermaid]
+....
+flowchart LR
+    Q[Query] --> E[Embed] --> S[Top-k cosine] --> P[Prompt] --> L[LLM] --> A[Answer]
+    V[(Vectors)] -.-> S
+....
+
+*Cost:* one embedding call, one ANN lookup, one LLM call. Nothing is cheaper.
+
+*Use it when:* the corpus is small (< ~1000 chunks), homogeneous, well-written
+prose, and queries are single-hop factual questions phrased in the document's
+own vocabulary.
+
+*It breaks when:* any of those conditions fails — which is nearly always. See the
+failure table in xref:RAG_Overview.adoc#_where_it_breaks[the overview].
+
+📄 xref:examples/naive_rag.py[`examples/naive_rag.py`]
+
+== Hybrid Search
+
+*Problem:* dense embeddings encode meaning by compressing it, and compression
+destroys exactly the tokens that carry no meaning but enormous discriminative
+power — order IDs, error codes, acronyms, version numbers, exact figures. Ask
+for `PIT` or `ERR_4021` and the embedding is close to nothing in particular.
+
+*Technique:* run a lexical retriever (BM25) alongside the vector retriever and
+fuse the two ranked lists.
+
+[mermaid]
+....
+flowchart LR
+    Q[Query] --> D[Dense retriever<br/>semantic meaning]
+    Q --> S[BM25 retriever<br/>exact terms + IDF]
+    D --> R{{Reciprocal<br/>Rank Fusion}}
+    S --> R
+    R --> C[Merged candidates]
+
+    style D fill:#e6f4ea,stroke:#34a853
+    style S fill:#fef7e0,stroke:#fbbc04
+    style R fill:#fce8e6,stroke:#ea4335
+....
+
+The two retrievers fail on *opposite* inputs, which is why fusing them helps
+rather than averaging out to mediocrity:
+
+[cols="2,1,1", options="header"]
+|===
+|Query |Dense |BM25
+
+|"how do I undo a release?" (doc says "roll back a deployment")
+|✅ finds it
+|❌ no term overlap
+
+|"what is a PIT?"
+|❌ acronym blurs
+|✅ exact match
+
+|"ERR_4021 troubleshooting"
+|❌
+|✅
+
+|"why does the customer feel misled?"
+|✅
+|❌
+|===
+
+*Cost:* a second index (BM25 is small and fast to build), plus one extra search
+per query. Negligible latency.
+
+*Don't skip it.* This is the cheapest large win in RAG.
+
+📄 xref:examples/hybrid_search.py[`examples/hybrid_search.py`] ·
+📖 xref:RAG_Hybrid_Search.adoc[full document]
+
+== HyDE
+
+Hypothetical Document Embeddings (link:https://arxiv.org/abs/2212.10496[Gao et al., 2022]).
+
+*Problem:* a question and its answer are different genres of text. "How long do
+I have to ask for a refund?" is short, interrogative and vague; the passage
+answering it is declarative and noun-dense. Embedding models are trained mostly
+on symmetric similarity, so the question vector often sits closer to *other
+questions* than to the answer.
+
+*Technique:* never embed the question. Ask the LLM to hallucinate an answer,
+then embed *that*.
+
+[mermaid]
+....
+flowchart LR
+    Q[Question<br/>'how long for a refund?'] --> G[LLM generates a<br/>hypothetical answer]
+    G --> H["'Refunds may be requested<br/>within 30 days of purchase...'<br/>(possibly WRONG)"]
+    H --> E[Embed the<br/>hypothesis]
+    E --> S[Search]
+    S --> R[REAL chunks<br/>'...within 14 days...']
+
+    style H fill:#fce8e6,stroke:#ea4335
+    style R fill:#e6f4ea,stroke:#34a853
+....
+
+The counter-intuitive part: *the hypothesis may be factually wrong and it still
+works*. It only has to be wrong in the right style and vocabulary, so its
+embedding lands in the neighbourhood where real answers live. The retrieved
+chunks are real, so the final answer stays grounded.
+
+*Cost:* one extra LLM call per query (~300-800 ms). That is the whole objection
+to HyDE and it is a real one for latency-sensitive UIs.
+
+*Don't use it for* keyword-ish queries — inventing a document around `PIT` adds
+noise. A cheap heuristic: skip HyDE when the query is under ~4 tokens or matches
+an ID pattern. Averaging the real query vector back in (`HyDE + query`) is a
+useful safety net against a hypothesis that drifts off-topic.
+
+📄 xref:examples/hyde.py[`examples/hyde.py`]
+
+== Multi-Query Retrieval
+
+*Problem:* the user's phrasing is one sample of their intent. A chunk that a
+slightly different phrasing would have found is invisible.
+
+*Technique:* ask the LLM for N paraphrases, retrieve for each, take the
+deduplicated union.
+
+[source,python]
+----
+queries = [original] + llm(f"Write 3 alternative phrasings of: {original}").splitlines()
+chunks  = {c.id: c for q in queries for c in retrieve(q, k=4)}.values()
+----
+
+*Cost:* one LLM call plus N retrievals. The retrievals parallelise, so wall-clock
+cost is roughly one LLM call.
+
+*Limitation:* a plain union has no notion of consensus — a chunk found by one
+variant ranks the same as one found by all four. RAG-Fusion fixes exactly that.
+
+== RAG-Fusion
+
+*Problem:* the union in Multi-Query throws away the strongest available signal —
+*how many independent phrasings found this chunk, and how highly*.
+
+*Technique:* keep the multi-query generation, but merge the ranked lists with
+Reciprocal Rank Fusion instead of a union.
+
+[mermaid]
+....
+flowchart TB
+    Q[Original query] --> G[LLM: generate<br/>4 query variants]
+    G --> Q1[variant 1] & Q2[variant 2] & Q3[variant 3] & Q4[variant 4]
+    Q1 --> R1[ranked list 1]
+    Q2 --> R2[ranked list 2]
+    Q3 --> R3[ranked list 3]
+    Q4 --> R4[ranked list 4]
+    R1 & R2 & R3 & R4 --> F{{"RRF:  score(d) = Σ 1/(60 + rank_i(d))"}}
+    F --> O[Consensus ranking]
+
+    style F fill:#fce8e6,stroke:#ea4335
+    style O fill:#e6f4ea,stroke:#34a853
+....
+
+RRF uses only *rank*, never raw score. That is the point: a chunk appearing at
+rank 2 in three lists beats a chunk appearing at rank 1 in one list, and no
+score normalisation is needed to say so.
+
+[source,python]
+----
+def rrf(ranked_lists, kappa=60):
+    scores = defaultdict(float)
+    for ranked in ranked_lists:
+        for rank, doc in enumerate(ranked, start=1):
+            scores[doc.id] += 1.0 / (kappa + rank)
+    return sorted(scores.items(), key=lambda kv: -kv[1])
+----
+
+*Distinguish the three fusions* — they compose and people conflate them:
+
+[cols="1,2,2", options="header"]
+|===
+|Name |Fuses |Over
+
+|Hybrid search
+|different *retrievers* (dense, BM25)
+|one query
+
+|RAG-Fusion
+|different *queries*
+|one retriever
+
+|Ensemble retrieval
+|different *indexes* (per-corpus, per-tenant)
+|one query
+|===
+
+*Cost:* 1 LLM call + N retrievals. Meaningful latency; measure before shipping.
+
+📄 xref:examples/rag_fusion.py[`examples/rag_fusion.py`]
+
+== RRR — Rewrite-Retrieve-Read
+
+link:https://arxiv.org/abs/2305.14283[Ma et al., 2023, "Query Rewriting for Retrieval-Augmented LLMs"].
+
+*Problem:* naive RAG is *retrieve-then-read* — it assumes the raw user query is
+a good search key. Real queries carry typos, chat context, multiple questions at
+once, and conversational filler that dilutes the embedding.
+
+*Technique:* insert a rewriter in front of retrieval.
+
+[mermaid]
+....
+flowchart LR
+    U["'so uh whats the refund window<br/>and how long till money lands'"] --> W[REWRITE]
+    W --> Q1["'refund eligibility window'"]
+    W --> Q2["'refund settlement time'"]
+    Q1 --> R[RETRIEVE]
+    Q2 --> R
+    R --> C[Context] --> RD[READ] --> A[Answer]
+    A -.->|"RL reward:<br/>was the answer right?"| W
+
+    style W fill:#fef7e0,stroke:#fbbc04
+    style RD fill:#f3e8fd,stroke:#a142f4
+....
+
+The paper's actual contribution is the dashed arrow: a *small trainable*
+rewriter optimised by reinforcement learning, where the reward is downstream
+answer correctness, not how nice the rewrite looks. Most teams start with a
+frozen LLM as the rewriter and only train one once they have query logs worth
+learning from.
+
+Three rewriter behaviours that matter in practice:
+
+[cols="1,3", options="header"]
+|===
+|Behaviour |Example
+
+|*Normalise*
+|"whats the refund window" → "refund eligibility window policy"
+
+|*Decompose*
+|"compare our refund window to our idempotency window" → two independent queries
+
+|*Step-back*
+|"was Aristotle's teacher born before 400 BC?" → "who was Aristotle's teacher and when were they born?"
+|===
+
+Decomposition matters more than it sounds: retrieving once for a compound query
+returns the *average* of two topics, which is usually neither.
+
+*Cost:* one LLM call, plus one retrieval per sub-question.
+
+📄 xref:examples/rewrite_retrieve_read.py[`examples/rewrite_retrieve_read.py`]
+
+=== Step-Back Prompting
+
+link:https://arxiv.org/abs/2310.06117[Zheng et al., 2023]. A specialisation of
+rewriting: before answering a specific question, retrieve the *background* by
+asking the more general question, then answer the specific one with both sets of
+context. Strong on questions where the specific fact is only derivable from a
+principle stated elsewhere.
+
+== Parent-Child Retrieval
+
+Also called *small-to-big* or `ParentDocumentRetriever`.
+
+*Problem:* chunk size forces a trade-off with no good single answer.
+
+[cols="1,2,2", options="header"]
+|===
+|
+|Small chunks (~200 tokens)
+|Large chunks (~2000 tokens)
+
+|Embedding precision
+|✅ one idea per vector
+|❌ average of five topics
+
+|Retrieval accuracy
+|✅ high
+|❌ close to everything, decisive about nothing
+
+|Answerability
+|❌ pronoun's antecedent is in the next chunk
+|✅ self-contained
+
+|Citation granularity
+|✅ points at a sentence
+|❌ points at a page
+|===
+
+*Technique:* refuse the trade-off. Index the small chunks, return the big ones.
+
+[mermaid]
+....
+flowchart TB
+    subgraph IDX["Index — children only"]
+        C1[child 1<br/>~200 tok] --> V[(vectors)]
+        C2[child 2] --> V
+        C3[child 3] --> V
+        C4[child 4] --> V
+    end
+
+    subgraph STORE["Docstore — parents, never embedded"]
+        P1[Parent A<br/>whole section]
+        P2[Parent B]
+    end
+
+    C1 -.->|parent_id| P1
+    C2 -.->|parent_id| P1
+    C3 -.->|parent_id| P2
+    C4 -.->|parent_id| P2
+
+    Q[Query] --> S[search children]
+    V -.-> S
+    S --> H["hits: child 2, child 1"]
+    H --> L[dedupe → parent ids]
+    L --> G["return Parent A<br/>(full context)"]
+
+    style IDX fill:#e6f4ea,stroke:#34a853
+    style STORE fill:#e8f0fe,stroke:#4285f4
+....
+
+Several children of the same parent hitting is a *strength* signal, not a
+duplication problem — keep the best score per parent rather than counting hits.
+
+*Cost:* a key-value docstore alongside the vector index. No extra model calls.
+Watch the context budget: parents are large, so `k` must come down.
+
+📄 xref:examples/parent_child_retriever.py[`examples/parent_child_retriever.py`]
+
+=== Sentence-Window Retrieval
+
+The same insight with an offset instead of a stored parent: embed one sentence,
+return it plus *n* sentences either side. Cheaper to build (no parent store),
+less structurally aware (the window can straddle a section boundary).
+
+== Contextual Compression
+
+*Problem:* retrieval returns whole chunks, but a relevant chunk is rarely
+relevant in every sentence. Typically two sentences answer the question and
+eight came along because they shared a chunk boundary. Those eight cost tokens,
+push the answer toward the middle of the context window where attention is
+weakest (link:https://arxiv.org/abs/2307.03172["Lost in the Middle", Liu et al., 2023]),
+and give the model more surface to be distracted by.
+
+*Technique:* post-process the retrieved set, query-aware, in three stages.
+
+[mermaid]
+....
+flowchart LR
+    R["5 chunks<br/>~3000 tokens"] --> F["① Filter<br/>drop below threshold"]
+    F --> X["② Extract<br/>keep relevant sentences"]
+    X --> O["③ Reorder<br/>strongest at the edges"]
+    O --> C["3 chunks<br/>~700 tokens"]
+
+    style F fill:#fef7e0,stroke:#fbbc04
+    style X fill:#fce8e6,stroke:#ea4335
+    style O fill:#e8f0fe,stroke:#4285f4
+    style C fill:#e6f4ea,stroke:#34a853
+....
+
+[cols="1,2,2", options="header"]
+|===
+|Stage |Cheap version |Sharp version
+
+|Filter
+|Cosine threshold — restores the notion of "nothing else qualifies", which top-k lacks
+|Cross-encoder score threshold
+
+|Extract
+|Per-sentence cosine, keep top-n in original order
+|LLM extractor that copies verbatim spans, or returns `NONE`
+
+|Reorder
+|Interleave so ranks 1,3,5 lead and 2,4 trail — weakest chunks end up buried in the middle
+|Same; there is no expensive version
+|===
+
+The LLM extractor's ability to return `NONE` makes it a relevance filter too,
+which is why it usually replaces stage 1 rather than following it.
+
+*Cost:* the embeddings version is free. The LLM version is one call per chunk —
+run them concurrently, and only on the post-rerank shortlist.
+
+*Risk:* an aggressive extractor can drop the qualifying clause ("...except for
+digital goods"). Always keep the verbatim source chunk for citation even when
+you compress what the model reads.
+
+📄 xref:examples/contextual_compression.py[`examples/contextual_compression.py`]
+
+== Contextual Retrieval
+
+link:https://www.anthropic.com/news/contextual-retrieval[Anthropic, 2024].
+
+*Problem:* the deepest flaw in any chunking scheme is that a chunk is torn out of
+the document that made it meaningful:
+
+[quote]
+____
+"The company's revenue grew by 3% over the previous quarter."
+____
+
+Which company? Which quarter? The chunk cannot be retrieved by "ACME Q2 2023
+revenue growth" — none of those tokens are in it — and if it *is* retrieved, the
+model cannot safely attribute it.
+
+*Technique:* fix it at index time. Before embedding, ask an LLM to write a
+one-or-two sentence situating preamble using the whole document, and prepend it.
+
+[mermaid]
+....
+flowchart LR
+    D[Whole document] --> P["LLM: 'situate this chunk<br/>within the document'"]
+    C["chunk:<br/>'revenue grew by 3%...'"] --> P
+    P --> CTX["'This is from ACME Corp's<br/>Q2 2023 filing; Q1 revenue<br/>was $314M.'"]
+    CTX --> J["prepend"]
+    C --> J
+    J --> E[Embed] --> V[(vectors)]
+    J --> B[Tokenize] --> BM[(BM25)]
+
+    style CTX fill:#fef7e0,stroke:#fbbc04
+    style J fill:#e6f4ea,stroke:#34a853
+....
+
+Reported results on Anthropic's benchmark suite:
+
+[cols="3,1", options="header"]
+|===
+|Configuration |Failed retrievals (top-20)
+
+|Baseline: embeddings + BM25
+|5.7%
+
+|+ contextual embeddings
+|3.7% (−35%)
+
+|+ contextual embeddings + contextual BM25
+|2.9% (−49%)
+
+|+ reranking
+|1.9% (−67%)
+|===
+
+*The cost objection and its answer:* "an LLM call per chunk" sounds prohibitive
+until you use prompt caching — the document goes in a cached prefix once, and
+each chunk call pays only for the chunk. That lands around a dollar per million
+corpus tokens, one time.
+
+*Trade-offs:* a full re-index whenever you change the prompt; and the preamble is
+model-written, so it must be stored in a *separate field* from the verbatim
+chunk and never quoted back to the user as source text.
+
+📄 xref:examples/contextual_retrieval.py[`examples/contextual_retrieval.py`]
+
+== Self-Query Retrieval
+
+*Problem:* "show me refund complaints from Q3 2024" is two queries wearing one
+coat — a semantic one ("refund complaints") and a structured filter
+(`quarter = Q3 2024`). Embedding the whole string retrieves documents that
+*mention* Q3 rather than documents *from* Q3.
+
+*Technique:* have the LLM split it, using a declared metadata schema.
+
+[source,python]
+----
+# Given a schema: {source: str, quarter: str, doc_type: enum, page: int}
+user_query = "refund complaints from Q3 2024 in support tickets"
+
+# LLM emits:
+{
+  "semantic_query": "refund complaints",
+  "filter": {"$and": [{"quarter": "Q3 2024"}, {"doc_type": "support_ticket"}]}
+}
+----
+
+The filter runs as a *pre-filter* in the vector DB, so scoping makes the search
+cheaper, not more expensive.
+
+*Cost:* one LLM call. *Risk:* a hallucinated filter value (`"Q3-2024"` vs
+`"Q3 2024"`) silently returns zero results — validate emitted values against the
+actual distinct values in your metadata, and fall back to unfiltered search when
+validation fails.
+
+📖 xref:RAG_Document_Management.adoc[Document Management] covers the metadata
+schema side.
+
+== Corrective RAG (CRAG)
+
+link:https://arxiv.org/abs/2401.15884[Yan et al., 2024].
+
+*Problem:* a fixed pipeline answers from whatever retrieval returned, even when
+retrieval returned nothing useful. Garbage in, confident garbage out.
+
+*Technique:* insert a lightweight *retrieval evaluator* that grades the retrieved
+set, and branch on the grade.
+
+[mermaid]
+....
+flowchart TB
+    Q[Query] --> R[Retrieve]
+    R --> E{Retrieval<br/>evaluator}
+    E -->|CORRECT| K[Knowledge refinement<br/>strip irrelevant strips]
+    E -->|AMBIGUOUS| B[Both: refine + web search]
+    E -->|INCORRECT| W[Web search /<br/>fallback corpus]
+    K --> G[Generate]
+    B --> G
+    W --> G
+    G --> A[Answer]
+
+    style E fill:#fef7e0,stroke:#fbbc04
+    style W fill:#fce8e6,stroke:#ea4335
+    style K fill:#e6f4ea,stroke:#34a853
+....
+
+The evaluator is deliberately small (the paper uses a fine-tuned T5); it is a
+classifier, not a reasoner. The "knowledge refinement" step decomposes retrieved
+documents into strips and filters them — essentially contextual compression under
+another name.
+
+*Cost:* one small model call per query, plus a fallback search when it fires.
+
+== Self-RAG
+
+link:https://arxiv.org/abs/2310.11511[Asai et al., 2024].
+
+*Problem:* retrieval is unconditional. Every query pays for it, including "hi",
+and no stage ever asks whether the retrieved text actually supports what was
+written.
+
+*Technique:* train the model to emit *reflection tokens* that make those
+decisions explicit and inspectable:
+
+[cols="1,3", options="header"]
+|===
+|Token |Decides
+
+|`[Retrieve]` / `[No Retrieve]`
+|Is retrieval needed for this continuation at all?
+
+|`[IsRel]`
+|Is this retrieved passage relevant?
+
+|`[IsSup]`
+|Is the generated sentence supported by the passage?
+
+|`[IsUse]`
+|Is the overall response useful?
+|===
+
+Because the tokens are generated, you can beam-search over them — generating
+several candidate continuations and keeping the one whose critique tokens score
+best.
+
+*Cost:* requires a fine-tuned model (or a prompted approximation, which is what
+most implementations actually do — LangGraph's "self-RAG" is a prompted state
+machine, not the trained model).
+
+== Late Chunking
+
+link:https://arxiv.org/abs/2409.04701[Günther et al., 2024, Jina AI].
+
+*Problem:* conventional chunking embeds each chunk in isolation, so a chunk that
+says "It settles in three days" has no idea what "it" is — the antecedent was in
+the previous chunk and is gone before the encoder ever runs.
+
+*Technique:* invert the order. Run the *entire document* through a long-context
+embedding model first, so every token attends to the whole document, then pool
+the token embeddings *per chunk*.
+
+[mermaid]
+....
+flowchart LR
+    subgraph N["Naive chunking"]
+        direction TB
+        N1[split] --> N2[embed each<br/>chunk alone]
+    end
+    subgraph L["Late chunking"]
+        direction TB
+        L1[embed WHOLE doc<br/>token-level] --> L2[split token<br/>embeddings] --> L3[mean-pool<br/>per chunk]
+    end
+    N -.->|"chunk loses<br/>its context"| X[❌]
+    L -.->|"chunk keeps<br/>document context"| Y[✅]
+
+    style L fill:#e6f4ea,stroke:#34a853
+    style N fill:#fce8e6,stroke:#ea4335
+....
+
+Compare with Contextual Retrieval: both give a chunk its context back, but late
+chunking does it *inside the encoder* (free at query time, no LLM calls) while
+Contextual Retrieval does it *in the text* (works with any embedding model, and
+also improves BM25). They are complementary, not alternatives.
+
+*Requires:* an embedding model with a long context window (8k+) and token-level
+output — `jina-embeddings-v3`, `nomic-embed-text-v1.5`.
+
+== ColBERT and Late Interaction
+
+*Problem:* a bi-encoder compresses a whole passage into one vector, losing
+term-level detail; a cross-encoder keeps everything but cannot be precomputed.
+
+*Technique:* store a vector *per token*, and score with MaxSim — for each query
+token, take its best match among the document's token vectors, and sum.
+
+[mermaid]
+....
+flowchart TB
+    subgraph BI["Bi-encoder"]
+        B1[query → 1 vector]
+        B2[doc → 1 vector]
+        B1 --- B3["cos(q, d)"] --- B2
+    end
+    subgraph LI["Late interaction / ColBERT"]
+        L1["query → 32 token vectors"]
+        L2["doc → 180 token vectors"]
+        L1 --- L3["Σ_i max_j  q_i · d_j"] --- L2
+    end
+    subgraph CE["Cross-encoder"]
+        C1["[query ; doc] → 1 score"]
+    end
+    BI -->|"fast, coarse<br/>precomputable"| S1[ ]
+    LI -->|"middle ground<br/>precomputable"| S2[ ]
+    CE -->|"slow, precise<br/>NOT precomputable"| S3[ ]
+
+    style BI fill:#e6f4ea,stroke:#34a853
+    style LI fill:#fef7e0,stroke:#fbbc04
+    style CE fill:#fce8e6,stroke:#ea4335
+....
+
+Document vectors are precomputable, so ColBERT can search a corpus — unlike a
+cross-encoder — while retaining term-level matching. The cost is storage: ~100x
+more vectors than a bi-encoder, though quantisation (PLAID) brings it down.
+
+Implementations: link:https://github.com/stanford-futuredata/ColBERT[ColBERT],
+link:https://github.com/AnswerDotAI/RAGatouille[RAGatouille] (friendly wrapper),
+`jina-colbert-v2`.
+
+== Comparison Table
+
+[cols="2,2,1,1,1,2", options="header"]
+|===
+|Technique |Fixes |Index cost |Query cost |Impact |Use when
+
+|Hybrid search
+|Lexical blind spot
+|+BM25 index
+|~0
+|High
+|Always
+
+|Cross-encoder rerank
+|Coarse top-k ordering
+|0
+|+50-200 ms
+|Very high
+|Almost always
+
+|HyDE
+|Question/answer asymmetry
+|0
+|+1 LLM call
+|Medium
+|Verbose natural-language queries
+
+|RAG-Fusion
+|Single-phrasing bias
+|0
+|+1 LLM + N searches
+|Medium
+|Ambiguous or broad queries
+
+|RRR
+|Messy real-world queries
+|0
+|+1 LLM call
+|Medium-high
+|Chat interfaces, compound questions
+
+|Parent-Child
+|Precision/context trade-off
+|+docstore
+|~0
+|Medium-high
+|Long structured documents
+
+|Contextual Compression
+|Noise and lost-in-the-middle
+|0
+|0 to +N LLM calls
+|Medium
+|Long chunks, tight context budgets
+
+|Contextual Retrieval
+|Chunks torn from context
+|+1 LLM call/chunk
+|0
+|High
+|Corpora with heavy cross-reference
+
+|Late Chunking
+|Same, without query-time cost
+|long-ctx embedder
+|0
+|Medium-high
+|You control the embedding model
+
+|Self-Query
+|Semantic + structured mixed
+|+metadata schema
+|+1 LLM call
+|High (when applicable)
+|Rich metadata exists
+
+|CRAG
+|Confident answers from bad retrieval
+|0
+|+1 small model
+|Medium
+|Retrieval quality is uneven
+
+|Self-RAG
+|Unconditional retrieval
+|fine-tune
+|variable
+|Medium
+|You can train, or accept a prompted approximation
+
+|ColBERT
+|Bi-encoder detail loss
+|~100x vectors
+|moderate
+|High
+|Storage is cheap, precision matters
+|===
+
+== Choosing: A Decision Path
+
+[mermaid]
+....
+flowchart TB
+    S([Retrieval quality is poor]) --> M{Have you measured<br/>hit-rate@k?}
+    M -->|no| ME[Build an eval set FIRST<br/>see RAG_Evaluation]
+    M -->|yes| H{Is hit-rate@20<br/>already high?}
+
+    H -->|"no — the right chunk<br/>is never retrieved"| REC[RECALL problem]
+    H -->|"yes — but hit-rate@3<br/>is low"| PRE[PRECISION problem]
+
+    REC --> R1{Failing on IDs,<br/>acronyms, codes?}
+    R1 -->|yes| R2[Hybrid search + BM25]
+    R1 -->|no| R3{Chunks lack<br/>context?}
+    R3 -->|yes| R4[Contextual Retrieval<br/>or Late Chunking]
+    R3 -->|no| R5{Query phrasing<br/>very different<br/>from documents?}
+    R5 -->|yes| R6[HyDE / RAG-Fusion]
+    R5 -->|no| R7[Revisit chunking<br/>and the parser]
+
+    PRE --> P1[Cross-encoder reranking<br/>← start here, always]
+    P1 --> P2{Still noisy?}
+    P2 -->|yes| P3[Contextual compression<br/>+ MMR for diversity]
+
+    style ME fill:#fef7e0,stroke:#fbbc04
+    style R2 fill:#e6f4ea,stroke:#34a853
+    style P1 fill:#e6f4ea,stroke:#34a853
+....
+
+The distinction that matters most: *a reranker can only reorder what retrieval
+gave it*. If the right chunk is not in the top 50, no amount of reranking,
+compression or prompting will recover it. Diagnose recall first.

@@ -1,0 +1,147 @@
+= RAG Examples
+:doctype: article
+:toc: left
+:toclevels: 2
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+Runnable Python companions to the documents in xref:../README.adoc[AI/rag].
+Every file is self-contained, heavily commented, and executable on its own.
+
+== Setup
+
+[source,bash]
+----
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Only the generation / judging examples need a key:
+export ANTHROPIC_API_KEY=sk-ant-...
+----
+
+The first run downloads embedding and reranker weights (~500 MB for the
+defaults). Examples that only do retrieval work offline once the weights are
+cached; examples that call an LLM are marked below.
+
+== Files
+
+[cols="2,3,1", options="header"]
+|===
+|File |Demonstrates |Needs LLM
+
+|`_common.py`
+|Shared corpus, lazy model loaders, citation formatting. Imported by everything else.
+|—
+
+|`naive_rag.py`
+|The three-step baseline: embed → top-k → stuff → generate.
+|yes
+
+|`chunking_strategies.py`
+|Seven splitters compared on one text: fixed, overlap, token, recursive, sentence-window, semantic, structural.
+|no
+
+|`docling_structure_chunking.py`
+|Layout-aware PDF parsing with Docling vs naive `pypdf` extraction.
+|no
+
+|`contextual_retrieval.py`
+|Anthropic's Contextual Retrieval — LLM-written preamble per chunk, with prompt caching.
+|yes
+
+|`embeddings_lab.py`
+|Query/passage prefixes, metrics, Matryoshka truncation, int8 and binary quantisation.
+|no
+
+|`hybrid_search.py`
+|Dense + BM25, fused by RRF and by weighted score fusion.
+|no
+
+|`hyde.py`
+|Hypothetical Document Embeddings — retrieve with a generated answer, not the question.
+|yes
+
+|`rag_fusion.py`
+|Multi-query generation + Reciprocal Rank Fusion.
+|yes
+
+|`rewrite_retrieve_read.py`
+|RRR: normalise, decompose and step-back query rewriting.
+|yes
+
+|`parent_child_retriever.py`
+|Small-to-big: index child chunks, return parent sections.
+|no
+
+|`cross_encoder_rerank.py`
+|Two-stage retrieve-and-rerank with a cross-encoder.
+|no
+
+|`contextual_compression.py`
+|Chunk filtering, sentence extraction, and lost-in-the-middle reordering.
+|optional
+
+|`hierarchical_rag.py`
+|Beam search down a summary tree: collection → document → chunk.
+|no
+
+|`agentic_rag.py`
+|Retrieval as a tool: the model plans, searches, grades, and re-searches.
+|yes
+
+|`multimodal_rag.py`
+|Figure extraction with provenance, VLM descriptions, retrieval over descriptions, generation from images.
+|yes
+
+|`citations.py`
+|Structured cited claims plus post-hoc verbatim-quote verification.
+|yes
+
+|`conversational_memory.py`
+|History-aware query contextualisation with a bounded window and rolling summary.
+|yes
+
+|`document_manager.py`
+|Full CRUD over a Chroma collection: idempotent upsert, list, scoped search, delete.
+|no
+
+|`ragas_eval.py`
+|RAGAS metrics plus deterministic hit-rate / MRR / nDCG for CI.
+|yes (RAGAS only)
+
+|`production_rag_pipeline.py`
+|Everything above, wired together, with per-stage ablation flags and a trace.
+|yes
+|===
+
+== Suggested reading order
+
+[source,text]
+----
+naive_rag.py                  # the baseline everything is measured against
+  └─ chunking_strategies.py   # the decision that constrains all the others
+     └─ embeddings_lab.py     # what the vectors actually encode
+        └─ hybrid_search.py   # first real accuracy jump
+           └─ cross_encoder_rerank.py   # second, larger jump
+              └─ contextual_compression.py
+                 └─ citations.py + conversational_memory.py
+                    └─ ragas_eval.py    # now you can measure the above
+                       └─ production_rag_pipeline.py
+----
+
+Query-transformation files (`hyde.py`, `rag_fusion.py`, `rewrite_retrieve_read.py`)
+and structural ones (`parent_child_retriever.py`, `hierarchical_rag.py`,
+`agentic_rag.py`) can be read in any order once hybrid search makes sense.
+
+== A note on the corpus
+
+`_common.py` defines six chunks chosen to be adversarial on purpose:
+
+* an acronym that appears exactly once (`PIT`) — dense search misses it, BM25 nails it
+* a numeric fact (`14 days`) — the classic lexical-match case
+* two near-duplicate architecture chunks — where reranking earns its latency
+* a paraphrase gap ("roll back" vs "undo a release") — where BM25 fails and dense wins
+
+That is enough to make every technique's win or loss visible in one terminal
+screen. Swap `CORPUS` for your own documents to see whether the same ordering
+holds — it usually does not, which is the whole argument for `ragas_eval.py`.
