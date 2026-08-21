@@ -18,6 +18,7 @@ faithfully processes the soup.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     P[/"Page: a revenue chart,<br/>a 3-column table,<br/>an architecture diagram"/]
 
@@ -50,6 +51,7 @@ retrieval earns its complexity when the answer is genuinely *pictorial*.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     D[Document with figures] --> S1 & S2 & S3
 
@@ -132,7 +134,8 @@ for generation.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     P[Parse: extract figures<br/>+ their captions + page no] --> V["VLM: describe this figure,<br/>given its caption and the<br/>surrounding paragraph"]
     V --> D["Description text"]
     D --> E[Embed with your<br/>normal text model] --> IDX[(Same vector index<br/>as everything else)]
@@ -219,15 +222,16 @@ patches.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph CLASSIC["Classic pipeline"]
-        direction LR
+        direction TB
         X1[PDF] --> X2[Layout parse] --> X3[Chunk] --> X4[Embed text] --> X5[(Index)]
         X2 -.->|"errors here<br/>propagate everywhere"| X6[⚠️]
     end
 
     subgraph COLPALI["ColPali"]
-        direction LR
+        direction TB
         Y1[PDF] --> Y2["Render each page<br/>to an image"] --> Y3["VLM → ~1030 patch<br/>embeddings per page"] --> Y4[(Late-interaction<br/>index)]
     end
 

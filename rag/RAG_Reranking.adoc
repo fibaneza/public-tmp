@@ -21,9 +21,10 @@ and exactly why the resulting order is coarse.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph BI["Bi-encoder — retrieval"]
-        direction LR
+        direction TB
         BQ[Query] --> BE1[Encoder] --> BV1[vector]
         BD[Doc] --> BE2[Encoder] --> BV2[vector]
         BV1 --> COS["cos(q, d)"]
@@ -31,7 +32,7 @@ flowchart TB
     end
 
     subgraph CE["Cross-encoder — reranking"]
-        direction LR
+        direction TB
         CQ[Query] --> CAT["[CLS] query [SEP] doc [SEP]"]
         CD[Doc] --> CAT
         CAT --> ENC[Transformer<br/>full cross-attention] --> SC[relevance score]
@@ -57,6 +58,7 @@ second stage and not a search index.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     C[("Corpus<br/>1,000,000 chunks")] --> S1
 

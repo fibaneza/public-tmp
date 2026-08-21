@@ -18,6 +18,7 @@ background; this document is retrieval-specific.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     subgraph OFF["Offline — once per chunk"]
         D[Chunk text] --> BE1[Bi-encoder] --> DV["[0.02, -0.31, ...]<br/>768 floats"]
@@ -120,6 +121,7 @@ the vector is still a valid embedding. `text-embedding-3-large`,
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     F["3072 dims<br/>12 KB/vector"] --> T1["1024 dims<br/>4 KB — ~99% of quality"]
     T1 --> T2["512 dims<br/>2 KB — ~97%"]

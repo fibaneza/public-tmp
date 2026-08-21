@@ -57,6 +57,9 @@ technique does about it*, *what it costs*, and *when not to use it*.
 |xref:RAG_Evaluation.adoc[*Evaluation & Metrics*]
 |What RAGAS is and what each metric means, deterministic retrieval metrics, building an eval set, CI gating, ablation tables.
 
+|xref:RAG_Observability.adoc[*Observability*]
+|What to instrument: the RAG trace with per-stage spans, quality proxies when there is no ground truth, per-stage metrics, RAG-specific alerts, sampling that keeps the interesting failures, and an incident dashboard.
+
 |xref:RAG_Operations.adoc[*Production Operations*]
 |Tracing one bad answer to the stage that caused it, the four kinds of drift, index migrations without downtime, alerting on a system that fails silently, an incident runbook and SLOs.
 
@@ -142,9 +145,10 @@ per unit of effort:
 . *Close the security gaps* — xref:RAG_Security.adoc[Security]. Retrieved
   documents are untrusted input, and access control has to be a pre-filter
   before there is production data behind it.
-. *Trace every answer* — xref:RAG_Operations.adoc[Production Operations]. RAG
-  degrades silently, so the ability to ask "why did it say that?" is what makes
-  everything above debuggable once real users arrive.
+. *Trace every answer* — xref:RAG_Observability.adoc[Observability] for what to
+  instrument, xref:RAG_Operations.adoc[Production Operations] for what to do with
+  it. RAG degrades silently, so the ability to ask "why did it say that?" is what
+  makes everything above debuggable once real users arrive.
 
 Everything after that — Contextual Retrieval, Parent-Child, RAG-Fusion, agentic
 loops — is worth measuring against your own eval set *and* your

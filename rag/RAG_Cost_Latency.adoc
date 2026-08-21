@@ -20,7 +20,8 @@ stage to remove.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     Q([Query]) --> A["Query rewrite<br/>(LLM)"] --> B["Embed query"] --> C["ANN + BM25"] --> D["Rerank"] --> E["Compress"] --> F["Generate<br/>(LLM)"] --> R([Answer])
 
     A -.- A1["300-800 ms<br/>~£0.0003"]
@@ -225,6 +226,7 @@ each row — int8 is near-free and should generally be the default.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     B([Total budget]) --> T1 & T2 & T3
 
@@ -346,6 +348,10 @@ with stage(trace, "generate"):
     answer = generate(query, chunks)
 # trace -> {"retrieve": 11.3, "rerank": 78.9, "generate": 2104.2}
 ----
+
+For a production version of this — per-stage timings emitted as CloudWatch
+metrics from FastAPI and LiteLLM — see
+xref:../observability/LLM_Observability_AWS.adoc[LLM Observability on AWS].
 
 The `Trace` dataclass in
 xref:examples/production_rag_pipeline.py[`examples/production_rag_pipeline.py`]

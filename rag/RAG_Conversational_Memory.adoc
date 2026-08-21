@@ -46,6 +46,7 @@ the rewrite, and answer as the original turn.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     H["History:<br/>Q: 'how do I roll back a deployment?'<br/>A: 'run payctl rollback --to...'"] --> C
     F["Follow-up:<br/>'what does it do to in-flight requests?'"] --> C
@@ -92,7 +93,8 @@ all degrade. The standard structure is a *sliding window plus a rolling summary*
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     subgraph MEM["Memory"]
         direction TB
         S["Rolling summary<br/>(turns 1-14, ~120 words)"]
@@ -148,6 +150,7 @@ idempotency keys kept *during a rollback*?").
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q[New message] --> D{Topic shift?}
     D -->|"cos(new, history) < 0.3<br/>OR no pronouns/ellipsis<br/>OR classifier says 'new'"| NEW["Treat as standalone<br/>Skip contextualisation<br/>Clear the context cache"]

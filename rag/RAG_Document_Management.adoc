@@ -57,6 +57,7 @@ must replace the old chunks atomically.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     F[File] --> H[content_hash = sha256]
     H --> Q{Existing doc<br/>with this doc_id?}
@@ -132,6 +133,7 @@ being an application database.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     Q[Query] --> F{Pre-filter<br/>metadata}
     F -->|"doc_id IN (a,b)<br/>AND acl @> caller_groups<br/>AND version = 'current'"| SUB["Candidate subset<br/>~2k vectors"]
@@ -239,6 +241,7 @@ xref:RAG_Security.adoc[RAG Security].
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     S[Source: S3, SharePoint,<br/>Confluence, Git, upload] --> W[Watcher / webhook /<br/>scheduled crawl]
     W --> Q[[Job queue]]

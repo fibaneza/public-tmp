@@ -96,6 +96,11 @@ reranker. See xref:RAG_Reranking.adoc[Reranking].
 
 == D
 
+*Burn rate*:: How fast an error budget is being consumed. `1x` exhausts it
+exactly at the window's end. Multi-window burn-rate alerting is what makes an
+SLO pageable — see
+xref:../../Tech-questions/Monitoring_Traceability_Alerts.adoc#_burn_rate_alerting[Burn-rate alerting].
+
 *Corpus drift*:: Source documents changed while the index did not, so the system
 confidently cites superseded content. Detected by reconciliation, not by anything
 in the query path. See xref:RAG_Operations.adoc#_drift[Drift].
@@ -296,6 +301,11 @@ bottom-up clustering and summarisation, searched as one flat collapsed index.
 
 *Reranking*:: Reordering retrieved candidates with a more expensive, more
 accurate model. See xref:RAG_Reranking.adoc[Reranking].
+
+*Quality proxy*:: An online signal that correlates with answer quality when no
+ground truth exists — refusal rate, citation verification rate, retrieval score
+distribution, follow-up rate. See
+xref:RAG_Observability.adoc#_quality_proxies[Quality proxies].
 
 *Reconciliation*:: A scheduled diff of `(doc_id, content_hash)` between the
 source of truth and the index, reporting what is missing, stale or orphaned.

@@ -19,6 +19,7 @@ introduced the naming that most of the field now uses.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph NAIVE["① Naive RAG — a straight line"]
         direction LR
@@ -27,23 +28,25 @@ flowchart TB
 
     subgraph ADV["② Advanced RAG — a line with stages"]
         direction LR
-        A1[Query] --> A2[Pre-retrieval<br/>rewrite, expand] --> A3[Retrieve<br/>hybrid]
-        A3 --> A4[Post-retrieval<br/>rerank, compress] --> A5[Generate] --> A6[Answer]
+        A1[Query] --> A2[Pre-retrieval<br/>rewrite<br/>expand] --> A3[Retrieve<br/>hybrid]
+        A3 --> A4[Post-retrieval<br/>rerank<br/>compress] --> A5[Generate] --> A6[Answer]
     end
 
     subgraph MOD["③ Modular RAG — a graph"]
-        direction LR
+        direction TB
         M1[Query] --> M2{Router}
-        M2 --> M3[Vector search]
+        M2 --> M3[Vector<br/>search]
         M2 --> M4[SQL / API]
-        M2 --> M5[Graph traversal]
-        M2 --> M6[No retrieval]
+        M2 --> M5[Graph<br/>traversal]
+        M2 --> M6[No<br/>retrieval]
         M3 & M4 & M5 & M6 --> M7[Fuse]
         M7 --> M8[Generate]
         M8 --> M9{Good<br/>enough?}
         M9 -->|no| M2
         M9 -->|yes| M10[Answer]
     end
+
+    NAIVE ~~~ ADV ~~~ MOD
 
     style NAIVE fill:#fce8e6,stroke:#ea4335
     style ADV fill:#fef7e0,stroke:#fbbc04
@@ -101,6 +104,7 @@ not about any sentence in it, so no chunk contains the answer.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q([Query: 'who owns settlement<br/>and how are errors fixed?'])
 
@@ -114,7 +118,7 @@ flowchart TB
 
     C1 ==>|"0.71 ✓"| L1
     C2 -->|0.12| X1[pruned]
-    C3 -->|0.09| X2[pruned]
+    C3 -->|0.09| X1
 
     subgraph L1["Level 1 — document summaries"]
         D1["Payments Architecture<br/>'ledger, idempotency,<br/>settlement'"]
@@ -124,7 +128,7 @@ flowchart TB
 
     D1 ==>|"0.68 ✓"| L0
     D2 -->|0.21| X3[pruned]
-    D3 -->|0.18| X4[pruned]
+    D3 -->|0.18| X3
 
     subgraph L0["Level 0 — chunks"]
         P1["'settlement is owned by<br/>the treasury team...'"]
@@ -159,6 +163,7 @@ built *bottom-up* and searched *flat*.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph BUILD["Build: recursive cluster + summarise"]
         direction TB
@@ -206,6 +211,7 @@ next.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q([User question]) --> AG[Agent<br/>LLM with tools]
 
@@ -257,7 +263,8 @@ predict the cost of.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     Q([Complex question]) --> P[Planner agent<br/>decompose]
     P --> A1[Docs agent]
     P --> A2[SQL agent]
@@ -289,6 +296,7 @@ over the graph.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph ING["Ingest"]
         direction TB
@@ -372,7 +380,8 @@ several in an agentic setup.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     Q[Question] --> R{Router}
     R -->|"factual /<br/>policy"| V[Vector search]
     R -->|"aggregate /<br/>metric"| S[Text-to-SQL]
@@ -403,7 +412,8 @@ over one corpus) and RAG-Fusion (different queries over one retriever).
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     Q[Query] --> R{Router:<br/>which indexes?}
     R --> I1[(Confluence)]
     R --> I2[(Jira)]
@@ -441,6 +451,7 @@ megabyte.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     S([What do your questions look like?]) --> Q1{Single-hop factual,<br/>one corpus?}
     Q1 -->|yes| A1[Advanced RAG<br/>hybrid + rerank]

@@ -22,6 +22,10 @@ error rate moves.
 The single most valuable operational capability, and the one most systems lack:
 being able to answer "why did it say that?" without re-running anything.
 
+What to instrument in the first place — span attributes per stage, quality
+proxies, and the metrics behind these alerts — is
+xref:RAG_Observability.adoc[RAG Observability].
+
 === What to Log
 
 Every answer needs a trace with a stable id the user can quote back to you.
@@ -53,6 +57,9 @@ Every answer needs a trace with a stable id the user can quote back to you.
 }
 ----
 
+A worked implementation of this trace on FastAPI and LiteLLM is in
+xref:../observability/LLM_Observability_AWS.adoc[LLM Observability on AWS].
+
 The `versions` block is what makes a trace from three weeks ago interpretable.
 Without it, "this used to work" is unfalsifiable — you cannot tell whether the
 prompt changed, the index was rebuilt, or the provider silently updated a model
@@ -72,29 +79,25 @@ it.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
-    S([User reports a bad answer]) --> Q1{Is the correct chunk<br/>in final_ids?}
+    S([User reports<br/>a bad answer]) --> Q1{Correct chunk<br/>in final_ids?}
 
-    Q1 -->|yes| G["**GENERATION** problem<br/>The model had the answer<br/>and did not use it"]
-    G --> G1["Check: was the chunk buried<br/>mid-context? (lost in the middle)<br/>Did compression trim the<br/>qualifying clause?<br/>Is the prompt ambiguous?<br/>Did verification pass on a<br/>claim it should have failed?"]
+    Q1 -->|yes| G["<b>GENERATION</b><br/>The model had the answer<br/>and did not use it"]
 
-    Q1 -->|no| Q2{Is it in<br/>candidate_ids?}
+    Q1 -->|no| Q2{In<br/>candidate_ids?}
 
-    Q2 -->|yes| R["**RANKING** problem<br/>Retrieval found it,<br/>reranking demoted it"]
-    R --> R1["Check: is the chunk longer than<br/>the cross-encoder window?<br/>(silent truncation)<br/>Is rerank_to too small?<br/>Did MMR drop it as redundant?"]
+    Q2 -->|yes| R["<b>RANKING</b><br/>Retrieval found it,<br/>reranking demoted it"]
 
-    Q2 -->|no| Q3{Does the chunk<br/>exist in the index?}
+    Q2 -->|no| Q3{In the index<br/>at all?}
 
-    Q3 -->|no| I["**INGESTION** problem<br/>The document never<br/>made it in"]
-    I --> I1["Check the dead-letter queue<br/>and the document registry.<br/>Parse failure? Filtered by<br/>a PII rule? Never crawled?"]
+    Q3 -->|no| I["<b>INGESTION</b><br/>The document never<br/>made it in"]
 
-    Q3 -->|yes| Q4{Does the ACL filter<br/>exclude it?}
+    Q3 -->|yes| Q4{ACL filter<br/>excludes it?}
 
-    Q4 -->|yes| A["**PERMISSION** problem<br/>— or correct behaviour"]
-    A --> A1["Is the user supposed to<br/>see it? If yes, this is<br/>permission drift"]
+    Q4 -->|yes| A["<b>PERMISSION</b><br/>— or correct behaviour"]
 
-    Q4 -->|no| RET["**RETRIEVAL** problem<br/>It is there, visible,<br/>and was not found"]
-    RET --> RET1["Search for it directly.<br/>Does BM25 find it but dense<br/>does not, or neither?<br/>Is the chunk missing the<br/>context that makes it match?"]
+    Q4 -->|no| RET["<b>RETRIEVAL</b><br/>It is there, visible,<br/>and was not found"]
 
     style G fill:#f3e8fd,stroke:#a142f4
     style R fill:#fce8e6,stroke:#ea4335
@@ -102,6 +105,28 @@ flowchart TB
     style A fill:#e8f0fe,stroke:#4285f4
     style RET fill:#e6f4ea,stroke:#34a853
 ....
+
+Once the tree gives you a verdict, this is what to check for it:
+
+[cols="1,3", options="header"]
+|===
+|Verdict |What to check
+
+|*GENERATION*
+|Was the chunk buried mid-context (lost in the middle)? Did compression trim the qualifying clause? Is the prompt ambiguous? Did verification pass on a claim it should have failed?
+
+|*RANKING*
+|Is the chunk longer than the cross-encoder window (silent truncation)? Is `rerank_to` too small? Did MMR drop it as redundant?
+
+|*INGESTION*
+|Check the dead-letter queue and the document registry. Parse failure? Filtered by a PII rule? Never crawled?
+
+|*PERMISSION*
+|Is the user supposed to see it? If yes, this is permission drift.
+
+|*RETRIEVAL*
+|Search for it directly. Does BM25 find it but dense does not, or neither? Is the chunk missing the context that makes it match?
+|===
 
 Two branches deserve emphasis because they are the ones teams misdiagnose:
 
@@ -150,13 +175,14 @@ The index is a *copy*. Copies rot, and nothing in the query path notices.
 
 [mermaid]
 ....
-flowchart TB
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart LR
     subgraph D["Four kinds of drift"]
         direction TB
-        D1["**Corpus drift**<br/>Source documents changed,<br/>index did not"]
-        D2["**Permission drift**<br/>ACLs changed at source,<br/>chunk metadata did not"]
-        D3["**Query drift**<br/>Users started asking about<br/>things the corpus never covered"]
-        D4["**Model drift**<br/>Provider updated a model<br/>behind the same name"]
+        D1["<b>Corpus drift</b><br/>Source documents changed,<br/>index did not"]
+        D2["<b>Permission drift</b><br/>ACLs changed at source,<br/>chunk metadata did not"]
+        D3["<b>Query drift</b><br/>Users started asking about<br/>things the corpus never covered"]
+        D4["<b>Model drift</b><br/>Provider updated a model<br/>behind the same name"]
     end
 
     D1 --> R1["Detect: nightly reconciliation —<br/>diff (doc_id, content_hash)<br/>between source and registry"]
@@ -209,6 +235,7 @@ migration, it is a switch.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph P1["① Build alongside"]
         A1["Index into collection v2<br/>while v1 serves all reads"]
@@ -436,3 +463,6 @@ ticket. Most of the rest is cheap once the trace exists.
   observability
 * link:https://github.com/evidentlyai/evidently[Evidently] — drift detection,
   originally for ML, applicable to embedding and query distributions
+* xref:../observability/LLM_Observability_AWS.adoc[LLM Observability on AWS] — a
+  concrete implementation of this document's tracing discipline on FastAPI,
+  LiteLLM and ECS, with CloudWatch metrics and alarms

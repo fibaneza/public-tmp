@@ -19,6 +19,7 @@ modify. Almost every "advanced RAG" list is some subset of this map.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q([Query]) --> A
 
@@ -88,6 +89,7 @@ prompt.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     Q[Query] --> E[Embed] --> S[Top-k cosine] --> P[Prompt] --> L[LLM] --> A[Answer]
     V[(Vectors)] -.-> S
@@ -116,6 +118,7 @@ fuse the two ranked lists.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     Q[Query] --> D[Dense retriever<br/>semantic meaning]
     Q --> S[BM25 retriever<br/>exact terms + IDF]
@@ -175,7 +178,8 @@ then embed *that*.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     Q[Question<br/>'how long for a refund?'] --> G[LLM generates a<br/>hypothetical answer]
     G --> H["'Refunds may be requested<br/>within 30 days of purchase...'<br/>(possibly WRONG)"]
     H --> E[Embed the<br/>hypothesis]
@@ -231,6 +235,7 @@ Reciprocal Rank Fusion instead of a union.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q[Original query] --> G[LLM: generate<br/>4 query variants]
     G --> Q1[variant 1] & Q2[variant 2] & Q3[variant 3] & Q4[variant 4]
@@ -294,7 +299,8 @@ once, and conversational filler that dilutes the embedding.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     U["'so uh whats the refund window<br/>and how long till money lands'"] --> W[REWRITE]
     W --> Q1["'refund eligibility window'"]
     W --> Q2["'refund settlement time'"]
@@ -377,6 +383,7 @@ Also called *small-to-big* or `ParentDocumentRetriever`.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph IDX["Index — children only"]
         C1[child 1<br/>~200 tok] --> V[(vectors)]
@@ -432,6 +439,7 @@ and give the model more surface to be distracted by.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     R["5 chunks<br/>~3000 tokens"] --> F["① Filter<br/>drop below threshold"]
     F --> X["② Extract<br/>keep relevant sentences"]
@@ -494,7 +502,8 @@ one-or-two sentence situating preamble using the whole document, and prepend it.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     D[Whole document] --> P["LLM: 'situate this chunk<br/>within the document'"]
     C["chunk:<br/>'revenue grew by 3%...'"] --> P
     P --> CTX["'This is from ACME Corp's<br/>Q2 2023 filing; Q1 revenue<br/>was $314M.'"]
@@ -581,6 +590,7 @@ set, and branch on the grade.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q[Query] --> R[Retrieve]
     R --> E{Retrieval<br/>evaluator}
@@ -654,6 +664,7 @@ the token embeddings *per chunk*.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     subgraph N["Naive chunking"]
         direction TB
@@ -688,7 +699,8 @@ token, take its best match among the document's token vectors, and sum.
 
 [mermaid]
 ....
-flowchart TB
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart LR
     subgraph BI["Bi-encoder"]
         B1[query → 1 vector]
         B2[doc → 1 vector]
@@ -821,6 +833,7 @@ link:https://github.com/AnswerDotAI/RAGatouille[RAGatouille] (friendly wrapper),
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     S([Retrieval quality is poor]) --> M{Have you measured<br/>hit-rate@k?}
     M -->|no| ME[Build an eval set FIRST<br/>see RAG_Evaluation]

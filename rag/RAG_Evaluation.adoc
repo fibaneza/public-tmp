@@ -19,14 +19,15 @@ which. So the metrics split along the pipeline seam.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q[Question] --> R[Retrieval]
     R --> C[Context]
     C --> G[Generation]
     G --> A[Answer]
 
-    R -.->|"measured by"| RM["**Retrieval metrics**<br/>context_precision<br/>context_recall<br/>hit-rate@k · MRR · nDCG"]
-    G -.->|"measured by"| GM["**Generation metrics**<br/>faithfulness<br/>answer_relevancy<br/>answer_correctness"]
+    R -.->|"measured by"| RM["<b>Retrieval metrics</b><br/>context_precision<br/>context_recall<br/>hit-rate@k · MRR · nDCG"]
+    G -.->|"measured by"| GM["<b>Generation metrics</b><br/>faithfulness<br/>answer_relevancy<br/>answer_correctness"]
 
     RM --> D{Diagnosis}
     GM --> D
@@ -59,16 +60,17 @@ checking those pieces against the context.
 
 [mermaid]
 ....
-flowchart TB
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart LR
     IN["Input row:<br/>question · answer ·<br/>contexts[] · ground_truth?"]
 
-    IN --> F["**faithfulness**<br/>1. split answer into claims<br/>2. can each claim be inferred<br/>from the context?<br/>score = supported / total"]
+    IN --> F["<b>faithfulness</b><br/>1. split answer into claims<br/>2. can each claim be inferred<br/>from the context?<br/>score = supported / total"]
 
-    IN --> AR["**answer_relevancy**<br/>1. generate N questions the<br/>answer would answer<br/>2. cosine vs the real question<br/>score = mean similarity"]
+    IN --> AR["<b>answer_relevancy</b><br/>1. generate N questions the<br/>answer would answer<br/>2. cosine vs the real question<br/>score = mean similarity"]
 
-    IN --> CP["**context_precision**<br/>for each retrieved chunk:<br/>was it useful for the answer?<br/>score = rank-weighted precision"]
+    IN --> CP["<b>context_precision</b><br/>for each retrieved chunk:<br/>was it useful for the answer?<br/>score = rank-weighted precision"]
 
-    IN --> CR["**context_recall**<br/>split ground_truth into claims<br/>score = claims attributable<br/>to the context / total"]
+    IN --> CR["<b>context_recall</b><br/>split ground_truth into claims<br/>score = claims attributable<br/>to the context / total"]
 
     F --> GEN[Generation side]
     AR --> GEN
@@ -295,6 +297,7 @@ set.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     PR[Pull request] --> FAST["Fast gate — every commit<br/>deterministic retrieval metrics<br/>on 50 labelled queries<br/>~10 s, £0"]
     FAST -->|"hit-rate@10 < baseline − 2%"| BLOCK[❌ Block merge]
@@ -319,8 +322,9 @@ does not grow from real traffic goes stale within a quarter.
 == Online Signals
 
 Offline metrics measure the pipeline; online signals measure whether it helps
-anyone. Turning these into alerts, and diagnosing an individual bad answer rather
-than an aggregate, is xref:RAG_Operations.adoc[Production Operations].
+anyone. Instrumenting them is xref:RAG_Observability.adoc[RAG Observability]; diagnosing
+an individual bad answer rather than an aggregate is
+xref:RAG_Operations.adoc[Production Operations].
 
 [cols="1,3", options="header"]
 |===

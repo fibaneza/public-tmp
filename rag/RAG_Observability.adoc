@@ -1,0 +1,448 @@
+= RAG Observability: Instrumenting the Pipeline
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectnums:
+:source-highlighter: rouge
+
+link:https://github.com/fibanez6/System-Design-and-Coding-Interview[System Design and Coding Interview]
+
+What to *measure* in a RAG system, and how to instrument each stage so that
+xref:RAG_Operations.adoc[diagnosis] is possible at all.
+
+Three documents divide this space, and it is worth knowing which one you want:
+
+[cols="1,3", options="header"]
+|===
+|Document |Answers
+
+|*This one*
+|"What do I instrument, and what does each number mean?"
+
+|xref:RAG_Operations.adoc[RAG Production Operations]
+|"This answer was wrong — which stage caused it?" Plus drift, migrations, runbook.
+
+|xref:../observability/LLM_Observability_AWS.adoc[LLM Observability on AWS]
+|"How do I ship this on FastAPI + LiteLLM + ECS + CloudWatch?"
+|===
+
+General, stack-agnostic monitoring theory — SLOs, burn-rate alerting, cardinality,
+alert design — is in
+xref:../../Tech-questions/Monitoring_Traceability_Alerts.adoc[Monitoring, Traceability and Alerts].
+This document is only what is *different about RAG*.
+
+== Why RAG Needs Its Own Answer
+
+Ordinary service monitoring assumes failure is observable. A broken web service
+returns a 500; a saturated queue grows; a crashed process stops responding.
+
+RAG breaks that assumption in three specific ways:
+
+[cols="1,3", options="header"]
+|===
+|Property |Consequence for instrumentation
+
+|*Failure is a 200 OK*
+|A pipeline retrieving the wrong chunks returns a fluent, confident, well-formed answer. Error rate, latency and saturation are all nominal. Nothing you would normally alarm on moves.
+
+|*There is no ground truth in production*
+|Offline you have labelled queries and can compute recall. Online you have neither, so every quality signal is a *proxy*, and you must know which proxy measures what.
+
+|*The pipeline is a funnel, not a chain*
+|1M chunks → 50 candidates → 5 chunks → 1 answer. A regression can be at any narrowing, and an aggregate latency or error metric cannot tell you which.
+|===
+
+So RAG observability is mostly about *building proxies for quality* and
+*attributing an outcome to a stage*. Everything else is ordinary service
+monitoring.
+
+== The RAG Trace
+
+One trace per query, one span per stage. This is the single highest-value
+artefact — it is what makes
+xref:RAG_Operations.adoc#_the_debugging_decision_tree[the debugging decision
+tree] mechanical rather than guesswork.
+
+[mermaid]
+....
+gantt
+    title One RAG query as a trace
+    dateFormat X
+    axisFormat %sms
+
+    section rag.query (root)
+    total                          :0, 2480
+
+    section query understanding
+    rag.contextualize              :0, 210
+    rag.rewrite                    :210, 380
+
+    section retrieval
+    rag.embed_query                :380, 398
+    rag.search.dense               :398, 412
+    rag.search.sparse              :398, 409
+    rag.fuse                       :412, 415
+
+    section ranking
+    rag.rerank                     :415, 496
+    rag.expand_parents             :496, 505
+    rag.compress                   :505, 512
+
+    section generation
+    rag.generate                   :512, 2440
+    rag.verify_citations           :2440, 2448
+....
+
+=== Span Attributes That Earn Their Place
+
+A span with only a duration tells you where time went and nothing about why the
+answer was wrong. These are the attributes that make a trace diagnostic:
+
+[cols="1,3", options="header"]
+|===
+|Span |Attributes
+
+|`rag.query` (root)
+|`query.text_hash`, `query.token_count`, `session.id`, `user.id`, `tenant.id`, `pipeline.version`, `index.snapshot`
+
+|`rag.contextualize`
+|`was_rewritten` (bool), `history.turns` — the bool is what lets you split metrics by follow-up vs first turn
+
+|`rag.search.*`
+|`retriever.type`, `k`, `results.count`, `score.top`, `score.min`, `score.mean`, `filter.applied`
+
+|`rag.fuse`
+|`inputs.count`, `overlap.count` — how many chunks both retrievers found, a direct signal of whether hybrid is earning its keep
+
+|`rag.rerank`
+|`candidates.count`, `top_n`, `score.top`, `rank_change.max`, `truncated` (bool)
+
+|`rag.compress`
+|`chars.before`, `chars.after`, `chunks.dropped`
+
+|`rag.generate`
+|`model`, `tokens.input`, `tokens.output`, `tokens.cached`, `cost_micro_usd`, `ttft_ms`, `finish_reason`
+
+|`rag.verify_citations`
+|`claims.total`, `claims.verified`, `claims.failed`
+|===
+
+*The one non-negotiable: record the retrieved chunk ids at every stage* —
+candidates, post-rerank, and final. Ids, not text: text is a copy of your corpus
+landing in a trace store with different access rules and retention, and you can
+resolve ids on demand through the same ACL check as retrieval.
+
+[source,python]
+----
+with tracer.start_as_current_span("rag.rerank") as span:
+    reranked = reranker.rerank(query, candidates, top_n=5)
+    span.set_attribute("rag.rerank.candidates_count", len(candidates))
+    span.set_attribute("rag.rerank.score_top", float(reranked[0].score))
+    # Ids only — never the chunk text.
+    span.set_attribute("rag.rerank.result_ids", [c.id for c, _ in reranked])
+    # Did reranking actually change anything? A max rank change of 0 across
+    # many queries means the stage is paying latency for nothing.
+    span.set_attribute("rag.rerank.rank_change_max",
+                       max_rank_delta(candidates, reranked))
+----
+
+=== OpenTelemetry GenAI Conventions
+
+Use the standard `gen_ai.*` attribute names where they exist rather than
+inventing your own — vendor dashboards and integrations are built against them:
+
+[cols="1,2", options="header"]
+|===
+|Standard attribute |Carries
+
+|`gen_ai.system`
+|The provider
+
+|`gen_ai.request.model` / `gen_ai.response.model`
+|Requested vs actually served — these differ under fallback routing
+
+|`gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`
+|Token counts
+
+|`gen_ai.response.finish_reasons`
+|`end_turn`, `max_tokens`, `refusal` — a rising `max_tokens` rate means truncated answers
+|===
+
+Retrieval has no equally settled convention, so namespace your own consistently
+under `rag.*` and document it once.
+
+== Quality Proxies
+
+You have no ground truth in production. These are the signals that correlate
+with quality, and — importantly — what each one actually measures.
+
+[cols="1,2,2", options="header"]
+|===
+|Signal |Rising means |Watch out
+
+|*Retrieval score distribution* (top-1, mean of top-k)
+|Falling = queries drifting away from what the corpus covers, or an index problem
+|Scores are not comparable across embedding models. A step change at a deploy is the model, not the world
+
+|*Score gap* (top-1 minus top-k)
+|A narrow gap means nothing stood out — the retriever is guessing
+|Naturally narrow on broad questions; segment by query type
+
+|*Refusal rate*
+|Up: retrieval degraded. *Down: worse* — the model started answering ungrounded
+|The only signal here where both directions are bad
+
+|*Citation verification failure rate*
+|The model is asserting things its sources do not support
+|The earliest hallucination signal you can compute mechanically. See xref:RAG_Citations.adoc#_quote_verification[quote verification]
+
+|*Context utilisation* (chunks cited ÷ chunks supplied)
+|Low = you are paying for context the model ignores; `k` is too high
+|Not a quality metric on its own — a low value with good answers means you can cut cost
+
+|*"No results" rate*
+|A filter or index broke, or a whole source stopped ingesting
+|Distinguish "zero hits" from "hits below threshold" — different causes
+
+|*Follow-up / rephrase rate*
+|Users immediately rephrasing means the first answer missed
+|Strongest real user signal available without asking them
+
+|*Answer length distribution*
+|A sudden shift usually means a prompt or model change, not a corpus change
+|Cheap canary for unannounced provider model updates
+|===
+
+*Refusal rate deserves the emphasis.* A RAG system that stops saying "I don't
+know" has not become smarter — it has started answering from model knowledge
+instead of your corpus, which is precisely the failure RAG exists to prevent.
+Alert on movement in *either* direction.
+
+== Per-Stage Metrics
+
+Low cardinality, safe to alarm on. High-cardinality context (user, session,
+query, chunk ids) belongs in the trace and the log —
+xref:../../Tech-questions/Monitoring_Traceability_Alerts.adoc#_cardinality_economics[the cardinality rule]
+applies unchanged here.
+
+[cols="1,2,2", options="header"]
+|===
+|Stage |Metrics |Labels (bounded only)
+
+|Ingestion
+|`documents_indexed`, `chunks_created`, `parse_failures`, `dlq_depth`, `index_lag_seconds`
+|`source`, `doc_type`, `status`
+
+|Retrieval
+|`retrieval_latency`, `results_returned`, `score_top`, `zero_results`
+|`retriever` (dense/sparse/hybrid), `filtered` (bool)
+
+|Reranking
+|`rerank_latency`, `candidates_in`, `rank_change_max`, `truncated_inputs`
+|`model`
+
+|Context
+|`context_tokens`, `chunks_supplied`, `compression_ratio`
+|`compressed` (bool)
+
+|Generation
+|`generation_latency`, `ttft`, `tokens_in/out/cached`, `cost_micro_usd`
+|`model`, `finish_reason`, `status`
+
+|Citations
+|`claims_total`, `claims_verified`, `verification_failures`
+|`status`
+
+|End to end
+|`query_latency`, `refusals`, `queries`
+|`route`, `status`, `is_followup`
+|===
+
+Two derived metrics worth computing explicitly because they answer questions the
+raw numbers do not:
+
+[source,python]
+----
+# Your own overhead, isolated from provider time. This is the number that says
+# whether to optimise your code or change provider.
+overhead_ms = query_latency_ms - generation_latency_ms
+
+# Is reranking earning its latency? If rank_change_max is ~0 across a large
+# sample, the stage is pure cost on this corpus.
+rerank_value = mean(rank_change_max)
+----
+
+`truncated_inputs` is the sleeper. A cross-encoder silently scores only the
+first 512 tokens of a longer chunk, so a parent-expansion change can quietly
+disable reranking with no error anywhere. Count it and alarm on it.
+
+== Ingestion Is Half the System
+
+The worst failure in RAG is a document that *silently* failed to index: the
+system answers "I don't have information about that", and everyone blames the
+model.
+
+[mermaid]
+....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart LR
+    S[Source of truth] --> R{{"Reconciliation<br/>diff (doc_id, content_hash)"}}
+    I[(Index)] --> R
+    R --> M["<b>missing</b><br/>never ingested<br/>→ alert"]
+    R --> ST["<b>stale</b><br/>changed, not re-indexed<br/>→ alert"]
+    R --> O["<b>orphaned</b><br/>deleted at source,<br/>still answering<br/>→ SECURITY alert"]
+
+    style O fill:#fce8e6,stroke:#ea4335
+    style M fill:#fef7e0,stroke:#fbbc04
+....
+
+Nothing in the *query* path can detect any of these — the index looks healthy
+because it is internally consistent. A scheduled reconciliation is the only
+thing that finds them; mechanics are in
+xref:RAG_Operations.adoc#_drift[Drift].
+
+Also instrument `index_lag_seconds` — the age of the oldest un-indexed change.
+It is the SLI behind a freshness SLO, and the one users complain about as "it
+doesn't know about the new policy".
+
+== RAG-Specific Alerts
+
+Ordinary alerts (latency, error rate, saturation) apply unchanged. These are the
+ones that exist *because* RAG fails silently:
+
+[cols="1,2,2", options="header"]
+|===
+|Alert |Condition |Means
+
+|*Refusal rate shift*
+|Step change either direction
+|Retrieval degraded, or the model started answering ungrounded
+
+|*Citation verification failures*
+|Above baseline
+|Drifting toward unsupported claims — the earliest mechanical hallucination signal
+
+|*Zero-results rate*
+|Step change
+|Index or filter broke; or a source stopped ingesting
+
+|*Retrieval score collapse*
+|Mean top-1 drops sharply
+|Wrong embedding model deployed, index corruption, or a re-index that did not complete
+
+|*Reconciliation delta*
+|`missing`/`stale` over threshold
+|Ingestion is broken and the corpus is going stale invisibly
+
+|*Reconciliation orphaned*
+|Any, immediately
+|Deleted documents still answering — treat as a security issue
+
+|*Rerank truncation*
+|`truncated_inputs` > 0
+|Chunks exceed the cross-encoder window; reranking is scoring fragments
+
+|*Index lag*
+|Above the freshness SLO
+|Ingestion pipeline stalled
+
+|*Cost per query*
+|Above budget
+|Usually an agentic path firing more often than expected
+|===
+
+Two RAG-shaped SLOs worth defining, in the split from
+xref:RAG_Operations.adoc#_slos_for_a_probabilistic_system[SLOs for a
+probabilistic system]:
+
+* *Groundedness* — ≥98% of claims pass citation verification. Mechanical, cheap,
+  computable in real time, and the closest thing to a quality SLO you can page on.
+* *Freshness* — 99% of source changes searchable within N minutes. Measured by
+  reconciliation, not by hope.
+
+Aggregate answer *quality* is a release gate, not a pager: LLM-judged metrics
+have run-to-run variance, and alerting on them produces a noisy pager the team
+learns to ignore.
+
+== Sampling
+
+Standard sampling reasoning applies, with one RAG-specific inversion.
+
+The traces you most want are the ones where retrieval scored *badly* — and those
+are exactly the queries a uniform sample discards. Force retention on:
+
+[source,python]
+----
+def should_keep_trace(trace) -> bool:
+    return (
+        trace.error                              # always
+        or trace.refused                         # "I don't know" — was that right?
+        or trace.citation_failures > 0           # possible hallucination
+        or trace.retrieval_score_top < THRESHOLD # the interesting failure mode
+        or trace.zero_results
+        or trace.latency_ms > SLO_MS
+        or trace.flagged_by_user                 # thumbs-down
+        or random.random() < BASELINE_RATE       # baseline for comparison
+    )
+----
+
+Keep the baseline sample — without a healthy population to compare against, you
+cannot tell whether a bad-looking trace is unusual.
+
+== A Dashboard That Works in an Incident
+
+[mermaid]
+....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
+    subgraph R1["Row 1 — is it broken?"]
+        A["Query rate · error rate<br/>p95 latency · SLO burn"]
+    end
+    subgraph R2["Row 2 — is it broken in the RAG-specific way?"]
+        B["Refusal rate · zero-results rate<br/>citation verification rate<br/>retrieval score top-1 (p50/p10)"]
+    end
+    subgraph R3["Row 3 — which stage?"]
+        C["Latency by stage<br/>rerank truncation · context tokens<br/>cost per query"]
+    end
+    subgraph R4["Row 4 — is the corpus healthy?"]
+        D["Index lag · DLQ depth<br/>reconciliation: missing / stale / orphaned"]
+    end
+
+    R1 --> R2 --> R3 --> R4
+
+    style R1 fill:#fce8e6,stroke:#ea4335
+    style R2 fill:#fef7e0,stroke:#fbbc04
+    style R3 fill:#e6f4ea,stroke:#34a853
+    style R4 fill:#e8f0fe,stroke:#4285f4
+....
+
+Row 2 is the row that does not exist on a generic service dashboard, and it is
+the one that catches the failures unique to RAG. Row 4 catches the failures that
+happen while the query path looks perfect.
+
+== Instrumentation Order
+
+. *Trace every query* with per-stage spans and the retrieved ids. Nothing else
+  works without it.
+. *Log one structured line per query* with `trace_id`, `session_id`,
+  `user_id` and the final chunk ids.
+. *Stage latency and cost metrics* — cheap, and they make the funnel visible.
+. *Refusal rate and zero-results rate* — the two cheapest quality proxies.
+. *Citation verification*, emitted as a metric — this becomes your groundedness SLO.
+. *Reconciliation job* with alerts on missing, stale and orphaned.
+. *Forced sampling* on low-score and failed traces.
+. *Feedback capture* (thumbs, copy, follow-up rate) wired back into the
+  xref:RAG_Evaluation.adoc[eval set].
+
+Steps 1 and 2 cost about a day and pay for themselves on the first support
+ticket. Step 8 is what makes the system improve rather than merely stay
+observable.
+
+== Related
+
+* xref:RAG_Operations.adoc[RAG Production Operations] — diagnosis, drift, migrations, runbook
+* xref:RAG_Evaluation.adoc[Evaluation & Metrics] — offline measurement and RAGAS
+* xref:RAG_Cost_Latency.adoc[Cost and Latency Budgeting] — where the p95 goes
+* xref:RAG_Citations.adoc[Source Citations] — the verification this instruments
+* xref:../observability/LLM_Observability_AWS.adoc[LLM Observability on AWS] — a worked stack
+* xref:../../Tech-questions/Monitoring_Traceability_Alerts.adoc[Monitoring, Traceability and Alerts] — the general theory

@@ -16,6 +16,7 @@ can be found and what can be quoted.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart LR
     C[Chunk<br/>boundaries] --> E[What the<br/>embedding encodes]
     C --> R[What can be<br/>retrieved at all]
@@ -55,6 +56,7 @@ citation points at a page whose content was never really there.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     PDF[/"PDF page:<br/>2 columns, a table,<br/>a header, a footnote"/]
 
@@ -163,7 +165,8 @@ xref:examples/chunking_strategies.py[`examples/chunking_strategies.py`].
 
 [mermaid]
 ....
-flowchart TB
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart LR
     T[Text] --> S1["① Fixed size<br/>text[i:i+N]"]
     T --> S2["② Fixed + overlap<br/>step = N − M"]
     T --> S3["③ Token-based<br/>size in tokens, not chars"]
@@ -238,7 +241,8 @@ cut wherever the distance spikes.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     S1["s1: 'Refunds within<br/>14 days.'"] -->|"dist 0.12"| S2["s2: 'After 14 days,<br/>case by case.'"]
     S2 -->|"dist 0.71 ⚡"| S3["s3: 'The ledger is<br/>append-only.'"]
     S3 -->|"dist 0.19"| S4["s4: 'Balances are<br/>derived by folding.'"]

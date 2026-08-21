@@ -18,21 +18,26 @@ spots.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph DENSE["Dense / vector search"]
+        direction TB
         D1["✅ 'undo a release' finds<br/>'roll back a deployment'"]
         D2["✅ paraphrase, synonym,<br/>translation, intent"]
         D3["❌ 'ERR_4021' → nearest<br/>neighbours are other codes"]
         D4["❌ 'PIT' → a 3-letter acronym<br/>embeds to near-noise"]
         D5["❌ exact figures, product<br/>names, version numbers"]
+        D1 ~~~ D2 ~~~ D3 ~~~ D4 ~~~ D5
     end
 
     subgraph SPARSE["BM25 / lexical search"]
+        direction TB
         S1["✅ 'ERR_4021' → exact,<br/>high IDF, unambiguous"]
         S2["✅ 'PIT', '14 days', 'v2.3.1'"]
         S3["✅ explainable: you can<br/>see which terms matched"]
         S4["❌ 'undo a release' shares no<br/>term with 'roll back'"]
         S5["❌ no notion of meaning"]
+        S1 ~~~ S2 ~~~ S3 ~~~ S4 ~~~ S5
     end
 
     DENSE -.->|"covers"| S4
@@ -91,7 +96,8 @@ Plain reading of the three parts:
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     Q["Query: 'PIT incident'"] --> T[Tokenize + lowercase<br/>+ optional stem/stopword]
     T --> L{{"For each term:<br/>IDF × saturated TF × length norm"}}
     L --> SUM["Σ over query terms"]
@@ -139,7 +145,8 @@ list.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     subgraph D["Dense ranking"]
         D1["1. c1"]
         D2["2. c5"]

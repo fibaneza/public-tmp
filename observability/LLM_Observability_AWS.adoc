@@ -49,6 +49,7 @@ by cannot use the same mechanism. Section 6 is where that gets resolved.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     U([Client]) -->|"Bearer token"| ALB[ALB]
 
@@ -143,6 +144,7 @@ without owning any state.
 
 [mermaid]
 ....
+%%{init: {"sequence": {"actorMargin": 18, "boxMargin": 6, "noteMargin": 6, "messageMargin": 24}} }%%
 sequenceDiagram
     participant C as Client
     participant F as FastAPI
@@ -150,19 +152,19 @@ sequenceDiagram
     participant L as LiteLLM
     participant P as Provider
 
-    C->>F: POST /chat {message}  (no session_id)
-    F->>D: create session ses_abc
-    F->>L: acompletion(messages, metadata={session_id: ses_abc,<br/>user_id, request_id, trace_id})
+    C->>F: POST /chat {message}<br/>(no session_id)
+    F->>D: create session<br/>ses_abc
+    F->>L: acompletion(messages,<br/>metadata={session_id:<br/>ses_abc, user_id,<br/>request_id, trace_id})
     L->>P: provider call
     P-->>L: response + usage
     L-->>F: response
-    Note over L: callback fires with kwargs + usage<br/>+ start/end time → emits EMF<br/>labelled with session_id and user_id
-    F->>D: append turn + usage ledger row<br/>(ONE transaction)
-    F-->>C: {reply, session_id: ses_abc}
+    Note over L: callback fires with<br/>kwargs + usage + start/end<br/>time → emits EMF labelled<br/>with session_id and user_id
+    F->>D: append turn + usage<br/>ledger row<br/>(ONE transaction)
+    F-->>C: {reply,<br/>session_id: ses_abc}
 
-    C->>F: POST /chat {message, session_id: ses_abc}
-    F->>D: load history (scoped to user_id)
-    Note over F,D: the user_id check is not belt-and-braces —<br/>a session id is a bearer token for a conversation
+    C->>F: POST /chat {message,<br/>session_id: ses_abc}
+    F->>D: load history<br/>(scoped to user_id)
+    Note over F,D: the user_id check is not<br/>belt-and-braces — a session id is<br/>a bearer token for a conversation
 ....
 
 The one line that makes cost attribution possible:
@@ -441,7 +443,8 @@ CloudWatch Logs, and CloudWatch extracts metrics from it automatically.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     APP["print(json)<br/>one line, with an _aws node"] --> DRV[awslogs<br/>log driver]
     DRV --> CWL[(CloudWatch Logs)]
     CWL --> EXT{{"automatic EMF<br/>extraction"}}
@@ -518,12 +521,13 @@ record* — free, unlimited cardinality, queryable.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     Q{"Do I need to ALARM<br/>on this field directly?"}
-    Q -->|no| P["**Property**<br/>free · unlimited cardinality<br/>query with Logs Insights"]
+    Q -->|no| P["<b>Property</b><br/>free · unlimited cardinality<br/>query with Logs Insights"]
     Q -->|yes| C{"Is the set of values<br/>bounded and small?"}
-    C -->|"yes — 4 models,<br/>3 routes, 2 statuses"| D["**Dimension**<br/>~30 metrics ≈ £9/month"]
-    C -->|"no — 20,000 users"| X["❌ **NOT a dimension**<br/>20,000 users × 4 models<br/>= 80,000 custom metrics<br/>= five figures per month<br/><br/>Use a scheduled Logs Insights<br/>query instead"]
+    C -->|"yes — 4 models,<br/>3 routes, 2 statuses"| D["<b>Dimension</b><br/>~30 metrics ≈ £9/month"]
+    C -->|"no — 20,000 users"| X["❌ <b>NOT a dimension</b><br/>20,000 users × 4 models<br/>= 80,000 custom metrics<br/>= five figures per month<br/><br/>Use a scheduled Logs Insights<br/>query instead"]
 
     style P fill:#e6f4ea,stroke:#34a853
     style D fill:#e6f4ea,stroke:#34a853
@@ -679,7 +683,8 @@ Alarms cannot watch a query. Bridge it with a scheduled Lambda:
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     EB["EventBridge<br/>rate(1 hour)"] --> L["Lambda: SELECT ... HAVING<br/>SUM(cost) > budget<br/>on llm_usage"]
     L --> D{"any user over<br/>their budget?"}
     D -->|yes| PM["PutMetricData<br/>UsersOverBudget = N<br/>+ user ids in the log"]
@@ -877,5 +882,9 @@ xref:../rag/RAG_Operations.adoc#_tracing_one_bad_answer[Tracing one bad answer].
   link:https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-proxy.html[RDS Proxy] ·
   link:https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html[IAM database authentication]
 * link:https://magicstack.github.io/asyncpg/current/[asyncpg documentation]
+* xref:../rag/RAG_Observability.adoc[RAG Observability] — what to instrument in a
+  retrieval pipeline specifically
 * xref:../rag/RAG_Operations.adoc[RAG Production Operations] ·
   xref:../rag/RAG_Cost_Latency.adoc[Cost and Latency Budgeting]
+* xref:../../Tech-questions/Monitoring_Traceability_Alerts.adoc[Monitoring, Traceability and Alerts] —
+  the general theory: SLOs, burn-rate alerting, alert design

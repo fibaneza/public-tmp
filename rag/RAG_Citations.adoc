@@ -19,6 +19,7 @@ In increasing order of trustworthiness, and they stack.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph M1["① Prompted markers"]
         A1["Number the sources.<br/>'Cite [1] after each claim.'"]
@@ -161,6 +162,7 @@ gate, and LLM-judged entailment offline on a sample as a quality metric.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     A[Claims] --> V{Verified?}
     V -->|yes| R["Render inline<br/>with footnote marker"]

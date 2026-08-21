@@ -40,7 +40,10 @@ Logging, tracing, cost attribution and alerting for LLM services.
 
 == Related
 
+* xref:../rag/RAG_Observability.adoc[RAG Observability] — what to instrument in a
+  retrieval pipeline
 * xref:../rag/RAG_Operations.adoc[RAG Production Operations] — the general
   discipline this implements
+* xref:../../Tech-questions/Monitoring_Traceability_Alerts.adoc[Monitoring, Traceability and Alerts]
 * xref:../rag/RAG_Cost_Latency.adoc[Cost and Latency Budgeting]
 * xref:../rag/README.adoc[Advanced RAG]

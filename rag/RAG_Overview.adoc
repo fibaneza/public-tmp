@@ -96,7 +96,8 @@ repair to one specific arrow.
 
 [mermaid]
 ....
-flowchart LR
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
+flowchart TB
     subgraph INDEX["Indexing — offline, once per document"]
         A[Documents<br/>PDF / HTML / MD] --> B[Parse<br/>extract text]
         B --> C[Chunk<br/>split into passages]
@@ -194,9 +195,10 @@ The ordering is not arbitrary — see the note below the diagram.
 
 [mermaid]
 ....
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 38, "padding": 8}} }%%
 flowchart TB
     subgraph ING["① Ingestion"]
-        direction LR
+        direction TB
         I1[Docling<br/>layout parse] --> I2[Structural<br/>chunking]
         I2 --> I3[Contextual<br/>preamble via LLM]
         I3 --> I4[Embed] --> I5[(Vector index)]
@@ -205,27 +207,27 @@ flowchart TB
     end
 
     subgraph UND["② Query understanding"]
-        direction LR
+        direction TB
         U1[Contextualise<br/>follow-up] --> U2[Rewrite /<br/>decompose]
         U2 --> U3[Multi-query<br/>expansion]
     end
 
     subgraph RET["③ Retrieval — recall"]
-        direction LR
+        direction TB
         R1[Dense<br/>ANN search] --> R3{{RRF merge}}
         R2[BM25<br/>lexical search] --> R3
         R3 --> R4[~50 candidates]
     end
 
     subgraph RANK["④ Ranking — precision"]
-        direction LR
+        direction TB
         K1[Cross-encoder<br/>rerank] --> K2[Parent<br/>expansion]
         K2 --> K3[Contextual<br/>compression]
         K3 --> K4[~5 chunks]
     end
 
     subgraph GEN["⑤ Generation"]
-        direction LR
+        direction TB
         G1[Prompt with<br/>numbered sources] --> G2[LLM]
         G2 --> G3[Cited claims<br/>JSON]
         G3 --> G4[Verify quotes]
@@ -374,6 +376,9 @@ decision is a guess dressed as an opinion.
 
 |xref:RAG_Evaluation.adoc[Evaluation & Metrics]
 |What RAGAS is, its metric definitions, retrieval metrics, generation metrics, building an eval set, CI gating.
+
+|xref:RAG_Observability.adoc[Observability]
+|The RAG trace and its span attributes, OTel GenAI conventions, quality proxies without ground truth, per-stage metrics, RAG-specific alerts, sampling, dashboard shape.
 
 |xref:RAG_Operations.adoc[Production Operations]
 |Answer tracing and the debugging decision tree, corpus/permission/query/model drift, dual-write migrations, alerting, incident runbook, SLOs.
